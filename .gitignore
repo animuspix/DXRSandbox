@@ -22,22 +22,14 @@ mono_crash.*
 [Rr]elease/
 [Rr]eleases/
 x64/
-!thirdparty/dxc_2022_12_16/lib/x64
-!thirdparty/dxc_2022_12_16/bin/x64
-
 x86/
-!thirdparty/dxc_2022_12_16/lib/x86
-!thirdparty/dxc_2022_12_16/bin/x86
 
 [Ww][Ii][Nn]32/
 [Aa][Rr][Mm]/
 [Aa][Rr][Mm]64/
-!thirdparty/dxc_2022_12_16/lib/arm64
-!thirdparty/dxc_2022_12_16/bin/arm64
 
 bld/
 [Bb]in/
-!thirdparty/dxc_2022_12_16/bin
 
 [Oo]bj/
 [Ll]og/
@@ -45,6 +37,12 @@ bld/
 
 # Allow test-model
 !testmodel.obj
+
+# Specifically allow DXC lib and executable files (x64 only)
+!thirdparty/dxc_2024_07_31/lib/x64/dxcompiler.lib
+!thirdparty/dxc_2024_07_31/bin/x64/dxcompiler.dll
+!thirdparty/dxc_2024_07_31/bin/x64/dxil.dll
+!thirdparty/dxc_2024_07_31/bin/x64/dxc.exe
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
