@@ -1459,17 +1459,17 @@ DXWrapper::DataHandle<D3D_PSO> DXWrapper::GenerateRayPSO(const char* precompiled
 	// Preparing linker markup
 	dxilDesc->NumExports = 3; // Raygen, closest-hit, miss
 	dxilDesc->pExports = (D3D12_EXPORT_DESC*)(&CPUMemoryLoan(3 * sizeof(D3D12_EXPORT_DESC)).mem[0]); // Not super sure about using an anonymous declaration like this, but hopefully it constructs/destructs appropriately
-	dxilDesc->pExports[0].ExportToRename = NULL;
-	dxilDesc->pExports[0].Name = raygenStageName;
-	dxilDesc->pExports[0].Flags = D3D12_EXPORT_FLAG_NONE;
+	//dxilDesc->pExports[0].ExportToRename = NULL;
+	//dxilDesc->pExports[0].Name = raygenStageName;
+	//dxilDesc->pExports[0].Flags = D3D12_EXPORT_FLAG_NONE;
 
-	dxilDesc->pExports[1].ExportToRename = NULL;
-	dxilDesc->pExports[1].Name = closestHitStageName;
-	dxilDesc->pExports[1].Flags = D3D12_EXPORT_FLAG_NONE;
+	//dxilDesc->pExports[1].ExportToRename = NULL;
+	//dxilDesc->pExports[1].Name = closestHitStageName;
+	//dxilDesc->pExports[1].Flags = D3D12_EXPORT_FLAG_NONE;
 
-	dxilDesc->pExports[2].ExportToRename = NULL;
-	dxilDesc->pExports[2].Name = closestHitStageName;
-	dxilDesc->pExports[2].Flags = D3D12_EXPORT_FLAG_NONE;
+	//dxilDesc->pExports[2].ExportToRename = NULL;
+	//dxilDesc->pExports[2].Name = closestHitStageName;
+	//dxilDesc->pExports[2].Flags = D3D12_EXPORT_FLAG_NONE;
 
 	// More linker markup :D
 	// (hit group set-up now, technically different from the dxil exports we marked up before)

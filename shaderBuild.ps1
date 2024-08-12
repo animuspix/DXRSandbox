@@ -37,7 +37,7 @@ for ($dirCtr = 0; $dirCtr -lt $dirs.Count; $dirCtr++)
 			# Compute build
 			if ($buildingCompute)
 			{
-				thirdparty\\dxc_2022_12_16\\bin\\x64\\dxc.exe -E main -T cs_6_5 -Fo $outPath $fFullName
+				thirdparty\\dxc_2024_07_31\\bin\\x64\\dxc.exe -E main -T cs_6_5 -Fo $outPath $fFullName
 				$success = $? # Weird and obscure error check, but it works!
 			}
 
@@ -45,11 +45,11 @@ for ($dirCtr = 0; $dirCtr -lt $dirs.Count; $dirCtr++)
 			elseif ($buildingGraphics)
 			{
 				$psoPath = $outDir + $extensions[$dirCtr][0]
-				thirdparty\\dxc_2022_12_16\\bin\\x64\\dxc.exe -E main_ps -T ps_6_5 -Fo $psoPath $fFullName
+				thirdparty\\dxc_2024_07_31\\bin\\x64\\dxc.exe -E main_ps -T ps_6_5 -Fo $psoPath $fFullName
 				$success = $?
 
 				$vsoPath = $outDir + $extensions[$dirCtr][1]
-				thirdparty\\dxc_2022_12_16\\bin\\x64\\dxc.exe -E main_vs -T vs_6_5 -Fo $vsoPath $fFullName
+				thirdparty\\dxc_2024_07_31\\bin\\x64\\dxc.exe -E main_vs -T vs_6_5 -Fo $vsoPath $fFullName
 				$success = $success -and $?
 			}
 			

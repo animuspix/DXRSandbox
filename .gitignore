@@ -21,7 +21,14 @@ mono_crash.*
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
-x64/
+SandboxApp/x64
+SandboxCore/x64
+x64/Debug DX12
+x64/Debug VK
+x64/Profile DX12
+x64/Release DX12
+x64/MemTest_Debug
+x64/MemTest_Release
 x86/
 
 [Ww][Ii][Nn]32/
@@ -29,7 +36,6 @@ x86/
 [Aa][Rr][Mm]64/
 
 bld/
-[Bb]in/
 
 [Oo]bj/
 [Ll]og/
