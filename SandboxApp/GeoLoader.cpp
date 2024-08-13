@@ -103,7 +103,7 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 	{
 		// Scan current line
 		uint32_t scanCursor = 0;
-		char line[32] = {};
+		char line[48] = {};
 		while (modelData[objCursor + scanCursor] != '\n')
 		{
 			line[scanCursor] = modelData[objCursor + scanCursor];
@@ -319,7 +319,8 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 
 		*params.outNumNdces = facesFront;
 
-#ifdef _DEBUG
+//#define LOG_INDICES
+#ifdef LOG_INDICES
 		for (uint32_t i = 0; i < facesFront; i += facesStride)
 		{
 			if (facesStride == 4)
@@ -436,6 +437,11 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 		// ...for each triangle, take all triangles sharing an edge and generate their face normals from the cross-product
 		// ...for each vertex in each triangle, assign their vertex normal as the average of above face normals
 
+		// This work is probably more appropriate for the GPU
+		// (extremely slow on CPU for realistically sized meshes)
+
+//#define CPU_NORMAL_EXTRACTION
+#ifdef CPU_NORMAL_EXTRACTION
 		// Abstract indices into triangles, and resolve face normals
 		const uint32_t numTris = *params.outNumNdces / 3;
 		auto triMetaBuff = CPUMemory::AllocateArray<TriMeta>(numTris);
@@ -498,6 +504,7 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 
 			float4FromVec4(&vert.normals, nAvg);
 		}
+#endif
 		
 		// Load data for UVs (all we want besides position & normals from OBJ - idea is to use OBJ for import, DXRS for continuing edits)
 		// Possible corruption here when separate UV/normal indices land on the same vert - most likely won't address that for now, but

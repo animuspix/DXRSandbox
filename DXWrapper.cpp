@@ -9,6 +9,8 @@
 #include <fstream>
 #include <filesystem>
 
+#include <wchar.h>
+
 #include "CPUMemory.h"
 #include "ResourceEnums.h"
 
@@ -216,7 +218,14 @@ enum HEAP_TYPES
 	GPU_ONLY_HEAP,
 	NUM_HEAP_TYPES
 };
-constexpr uint32_t maxBytesPerHeap = 1024 * 1024 * 1024; // One GiB per heap, 3GiB total (arbitrary, maybe excessive, can prune as needed)
+
+constexpr uint32_t maxBytesPerHeap = 1024 * 1024 * 128; // 96MB heaps, to fit entirely on chip memory for laptops - feasible? no idea :D but curious to try
+constexpr uint32_t maxResourceBytes = maxBytesPerHeap * NUM_HEAP_TYPES;
+
+// Total RHI usage is assumed to be total resource usage + 10MB worth of descriptors/shaders/etc (hopefully plenty)
+constexpr uint32_t nonResourceBytesEstimated = 10 * 1024 * 1024;
+constexpr uint32_t maxRHIBytes = maxResourceBytes + nonResourceBytesEstimated;
+
 ComPtr<ID3D12Heap> resourceHeaps[NUM_HEAP_TYPES];
 uint64_t heapOffsets[NUM_HEAP_TYPES] = {}; // One heap-offset/heap
 
@@ -255,13 +264,12 @@ bool DXWrapper::Init(HWND hwnd, uint32_t screenWidth, uint32_t screenHeight, boo
 	{
 		DXGI_ADAPTER_DESC1 tmpGPUInfo;
 		hr = gpuHW->GetDesc1(&tmpGPUInfo); // Get descriptions for iterated adapters
-		// Select the first adapter with >=2GB dedicated video memory as a proxy for the discrete adapter
-		// Can maybe check subsystem ID/vendor ID here instead
-		if (tmpGPUInfo.DedicatedVideoMemory >= INT_MAX)
+
+		if (tmpGPUInfo.DedicatedVideoMemory >= maxRHIBytes) // Less arbitrary test here, driven by global GPU memory estimates
 		{
-			if (!(tmpGPUInfo.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) // Skip past any defined software adapters
+			if (!(tmpGPUInfo.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) // Skip past any defined software adapters (might want to change this to support running on WARP for newer features/testing)
 			{
-				hr = D3D12CreateDevice(gpuHW.Get(), D3D_FEATURE_LEVEL::D3D_FEATURE_LEVEL_12_1, _uuidof(ID3D12Device), &device);
+				hr = D3D12CreateDevice(gpuHW.Get(), D3D_FEATURE_LEVEL::D3D_FEATURE_LEVEL_12_2, _uuidof(ID3D12Device), &device); // We want DXR!
 				if (SUCCEEDED(hr))
 				{
 					hr = gpuHW->GetDesc1(&adapterInfo);
@@ -276,7 +284,9 @@ bool DXWrapper::Init(HWND hwnd, uint32_t screenWidth, uint32_t screenHeight, boo
 	// Error out if a discrete GPU couldn't be found in the system
 	if (!dgpuFound)
 	{
-		printf("DXR Sandbox requires a gpu with at least 4GB video memory, and support for DX12 Ultimate (D3D_FEATURE_LEVEL_12_1)"); // Should maybe use a popup instead of a logged error here
+		wchar_t log[256] = {};
+		wsprintf(log, L"Either no DX12_2 gpu found, or the available GPU had less than %u bytes of dedicated memory\n", maxRHIBytes);
+		OutputDebugString(log);
 		assert(false);
 		return false;
 	}
@@ -1658,7 +1668,9 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 				// Somewhat concermed and considering using committed resources here - temp data on placed resources could quickly cause fragmentation
 				const auto resrcFlags = desc.Flags; // Cache flags, we have to zero them for temp allocs
 				desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-				device->CreatePlacedResource(resourceHeaps[UPLOAD_HEAP].Get(), heapOffsets[UPLOAD_HEAP], &desc, D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_GENERIC_READ, clearVal, IID_PPV_ARGS(&tmpResrcPool[numTmpResources]));
+				HRESULT success = device->CreatePlacedResource(resourceHeaps[UPLOAD_HEAP].Get(), heapOffsets[UPLOAD_HEAP], &desc, D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_GENERIC_READ, clearVal, IID_PPV_ARGS(&tmpResrcPool[numTmpResources]));
+				assert(success == S_OK);
+
 				memcpy(&desc.Flags, &resrcFlags, sizeof(decltype(desc.Flags)));
 
 				// Upload source data
@@ -1668,7 +1680,8 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 				tmpResrcPool[numTmpResources]->Unmap(0, &writeRange);
 
 				// Create on download heap
-				device->CreatePlacedResource(resourceHeaps[GPU_ONLY_HEAP].Get(), heapOffsets[GPU_ONLY_HEAP], &desc, D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_COPY_DEST, clearVal, IID_PPV_ARGS(&resources[resrcOffset].resrc));
+				success = device->CreatePlacedResource(resourceHeaps[GPU_ONLY_HEAP].Get(), heapOffsets[GPU_ONLY_HEAP], &desc, D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_COPY_DEST, clearVal, IID_PPV_ARGS(&resources[resrcOffset].resrc));
+				assert(success == S_OK);
 
 				// Copy from upload to download
 				bgCmdList->CopyBufferRegion(resources[resrcOffset].resrc.Get(), 0, tmpResrcPool[numTmpResources].Get(), 0, resrcFootprint);
