@@ -125,6 +125,7 @@ bool triHit(float3x3 triVerts, Ray ray, out float distance, out float3 bary)
     }   
     else
     {
+        distance = 9999.0f; // Close enough to infinity ^_^'
         return false;
     } 
 }
@@ -243,6 +244,8 @@ void main( uint3 DTid : SV_DispatchThreadID )
 
     while (traversingAS)
     {
+        asRGB.r = 1.0f;
+        break;
         uint currAS_Node = octreeProbeHistoryAbsoluteOffsets[currOctreeRank]; // Resolve currAS_Node from current probe history
         ComputeAS_Node asNode = octreeAS[currAS_Node];
         bool missRay = false;
@@ -250,6 +253,8 @@ void main( uint3 DTid : SV_DispatchThreadID )
         // Test the current node
         if (aabbHit(_ray, asNode.bounds[0].xyz, asNode.bounds[1].xyz)) // Need to fill out else statement for this x_x
         {
+            break;
+            
             // Load current children into our faux stack/history buffer
             // Should be safe to run for all nodes...leaf nodes won't get to this AS test anyway ^_^' and we should be able to keep
             // testing them inline
@@ -260,8 +265,8 @@ void main( uint3 DTid : SV_DispatchThreadID )
             }
 
             // Test the current cell
-            bool hasChildren = currAS_Node.containsTrisEventually == TRUE;
-            bool isBranch = currAS_Node.isBranchNode == TRUE;
+            bool hasChildren = asNode.containsTrisEventually == TRUE;
+            bool isBranch = asNode.isBranchNode == TRUE;
 
             if (!isBranch) // hmmmm
             {
@@ -330,7 +335,7 @@ void main( uint3 DTid : SV_DispatchThreadID )
             {
                 // Advance to the next rank (see above [if(traversingAS) { ... }] )
                 octreeProbeHistorySiblingOffsets[currOctreeRank + 1] = 0;
-                octreeProbeHistoryAbsoluteOffsets[currOctreeRank + 1] = childLookup;
+                //octreeProbeHistoryAbsoluteOffsets[currOctreeRank + 1] = childLookup;
                 currOctreeRank++;                
             }
             else // Walk around the current rank (see above [if(traversingAS) { ... }] )

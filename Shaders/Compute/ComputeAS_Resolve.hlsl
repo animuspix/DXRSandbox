@@ -11,7 +11,7 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
 {
     // AS resolve has a one-dimensional dispatch, so resolving thread indices is straightforward
     uint index = GTid.x + groupIndex;
-    
+    return;
     // Drop threads above the scene's vert count
     uint numTris = 0;
     uint vertStride = 0;
