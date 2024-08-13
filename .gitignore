@@ -37,12 +37,8 @@ x86/
 
 bld/
 
-[Oo]bj/
 [Ll]og/
 [Ll]ogs/
-
-# Allow test-model
-!testmodel.obj
 
 # Specifically allow DXC lib and executable files (x64 only)
 !thirdparty/dxc_2024_07_31/lib/x64/dxcompiler.lib
@@ -92,7 +88,7 @@ StyleCopReport.xml
 *_h.h
 *.ilk
 *.meta
-*.obj
+#*.obj # Also a common 3D object filename ^_^'
 *.iobj
 *.pch
 *.pdb

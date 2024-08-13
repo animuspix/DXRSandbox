@@ -58,7 +58,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     modelTransform.translationAndScale = float4(0, 0, 0, 1); // Test model sits at the origin, unit scale
 
     CPUMemory::ArrayAllocHandle<Scene::Model> testModels = CPUMemory::AllocateArray<Scene::Model>(MAX_SUPPORTED_OBJ_TRANSFORMS);
-    testModels[0] = { "testmodel.obj", SCENE_MODEL_FORMATS::OBJ, modelTransform }; // Implement loading for scenes/scene definitions eventually
+    testModels[0] = { "../Tests/Models/stanford-bunny.obj", SCENE_MODEL_FORMATS::OBJ, modelTransform }; // Implement loading for scenes/scene definitions eventually
 
     Scene testScene(testModels, 1);
     Geo::Init(1, &testScene);
