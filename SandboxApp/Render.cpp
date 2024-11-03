@@ -228,138 +228,48 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	// AS write-out (16M cells, at most two children each)
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc as_Desc;
 
-	constexpr uint64_t maxOctreeRank = 6;
-	constexpr auto computeNumOctreeNodes = []()
+	auto computeNumBvhCells = [](const uint32_t numTris)
 	{
-		uint32_t numOctreeNodes = 1;
-		for (uint32_t i = 0; i < maxOctreeRank; i++)
+		uint32_t numCells = 0;
+		uint32_t numChildren = numTris;
+		
+		while (numChildren > 0)
 		{
-			uint32_t rankLen = 1;
-			for (uint32_t k = 0; k <= i; k++)
-			{
-				rankLen *= 8;
-			}
-			numOctreeNodes += rankLen; // We need storage per-rank, not just for leaf nodes (the ones with rank size 8^maxOctreeRank)
+			numChildren /= AS_NODE_CHILDCOUNT;
+			numCells += numChildren;
 		}
-		return numOctreeNodes;
+
+		return numCells;
 	};
-	constexpr uint64_t numOctreeNodes = computeNumOctreeNodes(); // Up to eight children per node, supporting more than 1M triangles feels unnecessary
-	CPUMemory::ArrayAllocHandle<ComputeAS_Node> octreeAS = CPUMemory::AllocateArray<ComputeAS_Node>(numOctreeNodes);
+	
+	const uint64_t numCells = computeNumBvhCells(numTris); // Up to eight children per node, supporting more than 1M triangles feels unnecessary
+	CPUMemory::ArrayAllocHandle<ComputeAS_Node> bvhAS = CPUMemory::AllocateArray<ComputeAS_Node>(numCells);
 
-	// Octree layout like
-	// [0] (first rank)
-	// [1...8] (second rank)
-	// [9...72] (third rank)
-	// [..etc..]
+	// Simple zero-init; cells are populated on the GPU
+	// 
+	// GPU bvh setup plans:
+	// - Buffer structure goes rank N, rank N-1, down to zero (so root node on the far right)
+	// - Write-out elements to a shared front index/pointer, incremented using atomics
+	// -- First group sets of AS_CHILD_COUNT tris together and write them out in arbitrary order
+	// -- Memory barrier
+	// -- Group the boxes together into sets of AS_CHILD_COUNT and write those out in arbitrary order, in a separate segment after the triangles
+	// -- Memory barrier
+	// -- Repeat until we hit the root node
+	//
+	// Shared front pointer will probably need to be a property of the BVH structured buffer - can hopefully modify my RHI to support that feature
+	// with the right config options
 
-	const float sceneHeight = static_cast<uint32_t>(frameConstants->sceneBoundsMax.y - frameConstants->sceneBoundsMin.y);
-	const float sceneWidth = static_cast<uint32_t>(frameConstants->sceneBoundsMax.x - frameConstants->sceneBoundsMin.x);
-	const float sceneDepth = static_cast<uint32_t>(frameConstants->sceneBoundsMax.z - frameConstants->sceneBoundsMin.z);
+	// Traversal:
+	// Start at the root node
+	// Traverse all children of all nodes that descend from the root node
+	// If a ray misses a parent node, ignore it's children
+	// Weird stack/loop setup needed for step #2 was the blocker with the octree setup ^_^' hopefully easier this way
+	// No empty cells so we can simplify things quite a bit, into hopefully semi-unrolled recursive calls
+	// (but will need to think about it)
 
-#ifdef DEBUG
-	const float sceneMinX = frameConstants->sceneBoundsMin.x;
-	const float sceneMinY = frameConstants->sceneBoundsMin.y;
-	const float sceneMinZ = frameConstants->sceneBoundsMin.z;
+	CPUMemory::ZeroData(bvhAS);
 
-	const float sceneMaxX = frameConstants->sceneBoundsMax.x;
-	const float sceneMaxY = frameConstants->sceneBoundsMax.y;
-	const float sceneMaxZ = frameConstants->sceneBoundsMax.z;
-#endif
-
-	float cellWidth = sceneWidth;
-	float cellHeight = sceneHeight;
-	float cellDepth = sceneDepth;
-
-	// Octree is contained by a 1x1x1 supercell
-	uint32_t rankWidthCells = 1;
-	uint32_t rankHeightCells = 1;
-	uint32_t rankDepthCells = 1;
-
-	uint32_t childOffset = 1;
-	uint32_t octreeRankCtr = 0;
-	uint32_t rankSize = 1;
-
-	uint32_t octreeRankCellNdx = 0;
-
-	for (uint32_t i = 0; i < numOctreeNodes; i++)
-	{
-		if (octreeRankCtr < maxOctreeRank)
-		{
-			for (uint32_t j = 0; j < 8; j++)
-			{
-				octreeAS[i].children[j] = j + childOffset;
-				octreeAS[i].isBranchNode = TRUE;
-			}
-
-			octreeAS[i].numChildren = 8;
-		}
-		else
-		{
-			// Zero-initialize leaves (triangle children)
-			for (uint32_t j = 0; j < 8; j++)
-			{
-				octreeAS[i].children[j] = 0;
-			}
-			octreeAS[i].numChildren = 0;
-		}
-
-		octreeAS[i].bounds[0].x = static_cast<float>(octreeRankCellNdx % rankWidthCells) * cellWidth; // Count x up to width, then reset
-		octreeAS[i].bounds[0].y = static_cast<float>((octreeRankCellNdx / rankWidthCells) % rankHeightCells) * cellHeight; // Step y every width, and reset every height (new slice/plane)
-		octreeAS[i].bounds[0].z = static_cast<float>(octreeRankCellNdx / (rankWidthCells * rankHeightCells)) * cellDepth; // Step every width * height (every slice/plane)
-
-		octreeAS[i].bounds[0].x += frameConstants->sceneBoundsMin.x;
-		octreeAS[i].bounds[0].y += frameConstants->sceneBoundsMin.y;
-		octreeAS[i].bounds[0].z += frameConstants->sceneBoundsMin.z;
-
-		octreeAS[i].bounds[1].x = octreeAS[i].bounds[0].x + cellWidth;
-		octreeAS[i].bounds[1].y = octreeAS[i].bounds[0].y + cellHeight;
-		octreeAS[i].bounds[1].z = octreeAS[i].bounds[0].z + cellDepth;
-
-#ifdef DEBUG
-		if (octreeAS[i].bounds[1].x > sceneMaxX || octreeAS[i].bounds[1].y > sceneMaxY || octreeAS[i].bounds[1].z > sceneMaxZ)
-		{
-			const float cellMinX = octreeAS[i].bounds[0].x;
-			const float cellMinY = octreeAS[i].bounds[0].y;
-			const float cellMinZ = octreeAS[i].bounds[0].z;
-
-			const float cellMaxX = octreeAS[i].bounds[1].x;
-			const float cellMaxY = octreeAS[i].bounds[1].y;
-			const float cellMaxZ = octreeAS[i].bounds[1].z;
-
-			__debugbreak();
-		}
-#endif
-
-		octreeRankCellNdx++;
-		if (octreeRankCtr <= maxOctreeRank)
-		{
-			if (octreeRankCellNdx == rankSize)
-			{
-				octreeRankCellNdx = 0;
-				octreeRankCtr++;
-				rankSize *= 8;
-				childOffset += rankSize < 8 ? rankSize : 8;
-
-				cellWidth /= 2.0f;
-				cellHeight /= 2.0f;
-				cellDepth /= 2.0f;
-
-				rankWidthCells *= 2;
-				rankHeightCells *= 2;
-				rankDepthCells *= 2;
-			}
-			else
-			{
-				childOffset += 8;
-			}
-		}
-		else
-		{
-			childOffset += 8;
-		}
-	}
-
-	as_Desc.initForStructBuffer<ComputeAS_Node>(numOctreeNodes, L"octreeAS", octreeAS);
+	as_Desc.initForStructBuffer<ComputeAS_Node>(numCells, L"octreeAS", bvhAS);
 	auto customAS = compute_frame.pipes[0].RegisterStructBuffer(as_Desc, GENERIC_RESRC_ACCESS_DIRECT_WRITES);
 
 	// GPU PRNG state (one stream per-pixel/ray-path)

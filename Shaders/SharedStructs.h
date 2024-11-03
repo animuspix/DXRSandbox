@@ -35,6 +35,8 @@ struct IndexedTriangle
 #define FALSE 0
 #endif
 
+#define AS_NODE_CHILDCOUNT 4
+
 struct ComputeAS_Node
 {
 	float4 bounds[2]; // 16x2 bytes (32)
@@ -42,13 +44,7 @@ struct ComputeAS_Node
 	// Children are either triangle indices (bit 25 zero), or indices to another node (bit 25 set)
 	// Bit 26 determines if child indices are active or not
 	// Using an octree AS now, so each node has (up to) eight children
-	uint children[8]; // 4x8 bytes (32)
-
-	// Metadata + padding for 16B alignment
-	uint numChildren;
-	uint isBranchNode;
-	uint containsTrisEventually;
-	uint padding;
+	uint children[AS_NODE_CHILDCOUNT]; // 4x4 bytes (16)
 };
 
 struct MaterialPropertyEntry
