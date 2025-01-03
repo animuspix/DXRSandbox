@@ -129,6 +129,38 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
     // group strips of four triangles together, assuming that proximity in
     // equates to proximity in space 
 
+    // Quite naive algorithm here, see:
+    // Thinking Parallel, Part III: Tree Construction on the GPU for NV's approach
+
+    // (z-order sorting above was inspired by that tutorial, but haven't properly reviewed the actual tree construction bits yet)
+
+    // Main difference seems to be the decision (or not) where to split each node - I do it arbitrarily (naive linear subsets),
+    // the article goes by morton codes and splits whenever the highest bit changes, which seems compelling but also much more
+    // involved
+
+    // Seems it may be worth tagging triangles with their morton codes, in any case
+
+    // Essential difference is maybe a proper BVH with heuristic splits, vs an octree?
+    // Unsure how invested to be in this ^_^' it seems like the end result of heuristic splits is some kind of clustering
+    // algorithm, and I don't want to invest time in that if I don't need to
+
+    // Have to see the pix capture/test renders; if the distribution is bad we can go back to the article and improve
+
+    // Working traversal approach:
+    // - Depth-first traversal through each child of the root node
+    // - Populate history buffer on the way towards leaf nodes
+    // -- Embed alternative paths, where a box was hit successfully but not traversed
+    // - Append hit triangles to a local buffer
+    // - Traverse alternative paths, and append any hits to the local buffer from before
+    // - Sort triangle hits/intersections by distance along the ray
+    // - Shade/bounce using the closest hit
+
+    // Useful side-effect having entry/exit paths here, helpful for tracking changes in refractive index
+    // (+ bidirectional rendering, path integration tricks in general)
+
+    // Actual approach for the current octree
+    // - test all (triCount / childCount) nodes for AABB intersection
+
     ComputeAS_Node currentNode = octreeAS[sortingNdx / AS_NODE_CHILDCOUNT];
     currentNode.bounds[0].xyz = float3(min(min(vt0.x, vt1.x), vt2.x), 
                                        min(min(vt0.y, vt1.y), vt2.y),
