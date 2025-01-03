@@ -13,7 +13,6 @@ struct Alloc
 {
 	char* destPtr;
 	uint64_t size;
-	CPUMemory::AllocHandle* internalHandle; // For handle updates - they aren't well-ordered, so traversal is risky
 };
 
 struct AllocBuffer
@@ -73,7 +72,7 @@ void CPUMemory::Init()
 {
 	data = reinterpret_cast<char*>(malloc(initAlloc));
 	allocs = reinterpret_cast<AllocBuffer*>(data);
-	scratch = data + sizeof(AllocBuffer);
+	scratch = data + (initAlloc - scratchFootprint);
 	nextAllocAddress = data + clientDataOffset;
 	memUsed = 0;
 
@@ -171,7 +170,6 @@ CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, char* destPtr, uint64_t siz
 
 	CPUMemory::AllocHandle handle = allocs->numHandles;
 	allocs->handleConvertExternalInternal[handle] = allocs->numAllocs;
-	allocs->allocSet[allocs->numAllocs].internalHandle = &allocs->handleConvertExternalInternal[handle];
 
 	allocs->numAllocs++;
 	allocs->numHandles++;
@@ -218,12 +216,6 @@ void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handl
 		for (uint32_t i = ndx; i < (allocs->numAllocs - 1); i++)
 		{
 			std::swap(allocs->allocSet[i], allocs->allocSet[i + 1]);
-		}
-
-		// Update handles
-		for (uint32_t i = (ndx + 1); i < allocs->numAllocs; i++)
-		{
-			(*allocs->allocSet[i].internalHandle)--;
 		}
 
 		// Update the next allocation address
