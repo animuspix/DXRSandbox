@@ -35,7 +35,7 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
     IndexedTriangle tri = triBuffer[index];
     float3 vt0 = structuredVBuffer[tri.xyz.x].pos.xyz; // This is why you should separate attributes @.@
     float3 vt1 = structuredVBuffer[tri.xyz.y].pos.xyz;
-    float3 vt2 = structuredVBuffer[tri.xyz.z].pos.xyz;    
+    float3 vt2 = structuredVBuffer[tri.xyz.z].pos.xyz; 
     float3 centre = (vt0 + vt1 + vt2) * 0.33f;
 
     // Assumes normalized vertex positions (no premultiplied scale or whatever)
@@ -119,42 +119,64 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
 
     // Sort! (then sync again)
     triBuffer[sortingNdx] = tri;
+    AllMemoryBarrierWithGroupSync();
 
     // Is this the best sorting model we can do? Need to reconsider
     ///////////////////////////////////////////////////////////////
   
-    // First pass; sort triangles into boxes
-    // (by locality, non-local tris get sent to spare nodes for simplicity - a more sophisticated algorithm
-    // would run over all the non-local tris and compare them against all the bottom-most boxes, maybe
-    // something for another day)
+    // First pass, match triangles to boxes, four each;
+    // because of the spatial sort performed above we should be safe to simply
+    // group strips of four triangles together, assuming that proximity in
+    // equates to proximity in space 
 
+    ComputeAS_Node currentNode = octreeAS[sortingNdx / AS_NODE_CHILDCOUNT];
+    currentNode.bounds[0].xyz = float3(min(min(vt0.x, vt1.x), vt2.x), 
+                                       min(min(vt0.y, vt1.y), vt2.y),
+                                       min(min(vt0.z, vt1.z), vt2.z));
 
-    for (uint i = 0; i < AS_NODE_CHILDCOUNT; i++)
+    currentNode.bounds[1].xyz = float3(max(max(vt0.x, vt1.x), vt2.x), 
+                                       max(max(vt0.y, vt1.y), vt2.y),
+                                       max(max(vt0.z, vt1.z), vt2.z));
+
+    currentNode.bounds[0].w = 0;
+    currentNode.bounds[1].w = 0;
+
+    currentNode.children[0] = sortingNdx;
+
+    for (uint i = 1; i < AS_NODE_CHILDCOUNT; i++)
     {
-        IndexedTriangle tri = triBuffer[index + i];
-        
-        float4 vt0 = structuredVBuffer[tri.xyz.x].pos.xyz;
-        float4 vt1 = structuredVBuffer[tri.xyz.y].pos.xyz;
-        float4 vt2 = structuredVBuffer[tri.xyz.z].pos.xyz;
+        IndexedTriangle childTri = triBuffer[sortingNdx + i];
 
-        // Radial test might be more effective than simple connectivity test (checking indices)
-        // We care more about whether tris are relatively close than whether they're literally touching
+        float3 childVt0 = structuredVBuffer[childTri.xyz.x].pos.xyz;
+        float3 childVt1 = structuredVBuffer[childTri.xyz.y].pos.xyz;
+        float3 childVt2 = structuredVBuffer[childTri.xyz.z].pos.xyz;
 
-        // This algorithm still follows indices in regular, non-meshletized geometry, so it's prone
-        // to long & inefficient strips
+        float3 triMins = float3(min(min(childVt0.x, childVt1.x), childVt2.x), 
+                                min(min(childVt0.y, childVt1.y), childVt2.y),
+                                min(min(childVt0.z, childVt1.z), childVt2.z));
 
-        // An alternative would be some kind of clustering algorithm;
+        float3 triMaxes = float3(max(max(childVt0.x, childVt1.x), childVt2.x), 
+                                 max(max(childVt0.y, childVt1.y), childVt2.y),
+                                 max(max(childVt0.z, childVt1.z), childVt2.z));
+
+        currentNode.bounds[0].xyz = min(triMins, currentNode.bounds[0].xyz);                                
+        currentNode.bounds[1].xyz = max(triMaxes, currentNode.bounds[1].xyz);
+
+        currentNode.children[i] = sortingNdx + i;
     }
+
+    // Test the above AABBs in the compute shader/in PIX before grouping further
+    // Might be worthwhile to implement a simple debug mode that terminates on AABB hits
+    // & shades with box normals, to better visualize the generated BVH layout
 
     // Memory barrier
-    AllMemoryBarrierWithGroupSync(); // Might be overkill
+    //AllMemoryBarrierWithGroupSync(); // Might be overkill
 
     // Recurrent passes; sort boxes into bigger boxes
-    uint maxRanks = getMaxBVHRanks(numTris);
+    //uint maxRanks = getMaxBVHRanks(numTris);
 
-    for (uint rankNdx = 0; rankNdx < maxRanks; rankNdx++)
-    {
-
-        AllMemoryBarrierWithGroupSync(); // Might be overkill
-    }
+    //for (uint rankNdx = 0; rankNdx < maxRanks; rankNdx++)
+    //{
+    //    AllMemoryBarrierWithGroupSync(); // Might be overkill
+    //}
 }
