@@ -211,6 +211,20 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	const uint32_t numTris = sceneGeo.ibufferDesc.dimensions[0] / 3;
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredTribufferDesc;
 
+	// Sorting z-order indices problematic on GPU; doable, but messy, and likely to involve RHI work
+	// Also problematic on CPU; messy RHI work needed for the repeated gpu updates, and overall not
+	// ideal when we're aiming for a GPU-driven architecture (like many modern rendering engines)
+
+	// Alternative; renormalization
+	// The triangle order is what matters, not the numbers! So we can find the most distant scene pos
+	// (= largest possible z-value), divide smaller z-values against it, then scale back out using
+	// the nunber of triangles
+
+	// Might need to put the "most distant" scene pos in our constant buffer, but hopefully that isn't
+	// too high-overhead
+
+	// Not needed after all; we can compute & stash the max z-value entirely on GPU using some barrier/InterlockedX trickery
+
 	uint64_t* sourceNdces = reinterpret_cast<uint64_t*>(&sceneGeo.ibufferDesc.srcData[0]);
 	auto tribufferMemory = CPUMemory::AllocateArray<IndexedTriangle>(numTris);
 	for (uint32_t i = 0; i < numTris; i++)
@@ -244,29 +258,34 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	
 	const uint64_t numCells = computeNumBvhCells(numTris); // Up to eight children per node, supporting more than 1M triangles feels unnecessary
 	CPUMemory::ArrayAllocHandle<ComputeAS_Node> bvhAS = CPUMemory::AllocateArray<ComputeAS_Node>(numCells);
+ 
+	// GPU bvh setup plans:
+	// - Buffer structure goes from rank 0 (root node) down to rank N (last before triangles), left-to-right (better for cache, easier to read)
+	// - Implicit clustering using z-ordered indices (see above)
+	// - Nodes have bounds, two children (not 8 - relying on the implicit 3D nature of the z-curve to use a simpler binary search), and a flag
+	//   indicating if their children are leaves/branches
+	// - "Children" in leaf parents are an offset + count (up to 16) into the z-ordered tribuffer
+	// 
+	// - Expanding on binary search impl, root node covers the entire scene; next two cover half each, their children cover 1/4 each, etc
+	// - Branches are tesselating cubes, so bounds should be predictable; check old octree buffer setup for ideas
+	// 
+	// - Traversal
+	// -- Assume sky hits/scene misses if no intersection with the root node
+	// -- Otherwise chase node children
+	// --- Every time we pick a child, increment the current rank & update our traversal coordinates in a history buffer
+	// --- No point tracking children of leaf nodes since they aren't nodes themselves; treat the whole 16-tri intersection test as a simple
+	//     yes/no hit query for the containing leaf
+	// 
+	// -- If we hit a triangle eventually, success!
+	// -- Otherwise (for any miss event, tris or nodes), switch the child selected in the previous rank and try again
+	// -- If we backtrack all the way to the root node, assume the ray intersects the bounding volume but not the actual geometry
+	// 
+	// - Buffer setup should still be GPU-side as much as possible, for simplicity
+	// -- We could put the tribuffer sorting on the gpu using a copy into a second buffer, instead of hardcoding like above; worth
+	//    considering since it would support animations more easily hmmm
+	//
 
 	// Simple zero-init; cells are populated on the GPU
-	// 
-	// GPU bvh setup plans:
-	// - Buffer structure goes rank N, rank N-1, down to zero (so root node on the far right)
-	// - Write-out elements to a shared front index/pointer, incremented using atomics
-	// -- First group sets of AS_CHILD_COUNT tris together and write them out in arbitrary order
-	// -- Memory barrier
-	// -- Group the boxes together into sets of AS_CHILD_COUNT and write those out in arbitrary order, in a separate segment after the triangles
-	// -- Memory barrier
-	// -- Repeat until we hit the root node
-	//
-	// Shared front pointer will probably need to be a property of the BVH structured buffer - can hopefully modify my RHI to support that feature
-	// with the right config options
-
-	// Traversal:
-	// Start at the root node
-	// Traverse all children of all nodes that descend from the root node
-	// If a ray misses a parent node, ignore it's children
-	// Weird stack/loop setup needed for step #2 was the blocker with the octree setup ^_^' hopefully easier this way
-	// No empty cells so we can simplify things quite a bit, into hopefully semi-unrolled recursive calls
-	// (but will need to think about it)
-
 	CPUMemory::ZeroData(bvhAS);
 
 	as_Desc.initForStructBuffer<ComputeAS_Node>(numCells, L"octreeAS", bvhAS);
@@ -297,7 +316,9 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	// Shader registration
 	// Move onto this after verifying resource set-up
-	auto csAS_ResolutionHandle = compute_frame.pipes[0].RegisterComputeShader("ComputeAS_Resolve.cso", std::max(numTris / 512, 1u), 1, 1);
+	
+	// One thread for every [AS_NODE_CHILD_COUNT] tris
+	auto csAS_ResolutionHandle = compute_frame.pipes[0].RegisterComputeShader("ComputeAS_Resolve.cso", std::max((numTris / AS_NODE_CHILDCOUNT) / 64, 1u), 1, 1);
 	compute_frame.pipes[0].AppendComputeExec(csAS_ResolutionHandle);
 
 	// Work-submission legwork quietly automates when we call (or JIT if we wait until SubmitCmdList, whichever)
