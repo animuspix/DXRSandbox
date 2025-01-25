@@ -183,10 +183,11 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	GPUResource<ResourceViews::CBUFFER>::resrc_desc computeCBufDesc;
 
 	// Constants!
-	// Materials
 
+	// Generic
 	UpdateComputeConstants(frameConstants);
 
+	// Materials
 	// Current packing algorithm sits on the x-axis
 	// Should drive runtime atlas dimensions from calculations here
 	computeConstants->screenAndLensOptions.materialAtlasDims = float4(0.0f, sceneMaterials[0].spectralTexY, 0.0f, sceneMaterials[0].roughnessTexY);
@@ -206,7 +207,9 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredVbufferDesc;
 	structuredVbufferDesc.dimensions[0] = sceneGeo.vbufferDesc.dimensions[0];
 	structuredVbufferDesc.initForStructBuffer(sceneGeo.vbufferDesc.dimensions[0], sceneGeo.vbufferDesc.stride, L"structuredVbuffer", sceneGeo.vbufferDesc.srcData);
-	auto structuredVbuffer = compute_frame.pipes[0].RegisterStructBuffer(structuredVbufferDesc, GENERIC_RESRC_ACCESS_DIRECT_WRITES | GENERIC_RESRC_ACCESS_DIRECT_READS);
+
+	constexpr int resrcRW_Permissions = GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES;
+	auto structuredVbuffer = compute_frame.pipes[0].RegisterStructBuffer(structuredVbufferDesc, resrcRW_Permissions);
 
 	const uint32_t numTris = sceneGeo.ibufferDesc.dimensions[0] / 3;
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredTribufferDesc;
@@ -237,7 +240,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	}
 
 	structuredTribufferDesc.initForStructBuffer(numTris, sizeof(IndexedTriangle), L"structuredTribuffer", tribufferMemory.GetBytesHandle());
-	auto tribufferHandle = compute_frame.pipes[0].RegisterStructBuffer(structuredTribufferDesc, GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES);
+	auto tribufferHandle = compute_frame.pipes[0].RegisterStructBuffer(structuredTribufferDesc, resrcRW_Permissions);
 
 	// AS write-out (16M cells, at most two children each)
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc as_Desc;
@@ -289,7 +292,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	CPUMemory::ZeroData(bvhAS);
 
 	as_Desc.initForStructBuffer<ComputeAS_Node>(numCells, L"octreeAS", bvhAS);
-	auto customAS = compute_frame.pipes[0].RegisterStructBuffer(as_Desc, GENERIC_RESRC_ACCESS_DIRECT_WRITES);
+	auto customAS = compute_frame.pipes[0].RegisterStructBuffer(as_Desc, resrcRW_Permissions);
 
 	// GPU PRNG state (one stream per-pixel/ray-path)
 	CPUMemory::ArrayAllocHandle<GPU_PRNG_Channel> prngState = CPUMemory::AllocateArray<GPU_PRNG_Channel>(screenWidth * screenHeight);
@@ -311,14 +314,14 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc prng_Desc;
 	prng_Desc.initForStructBuffer<GPU_PRNG_Channel>(screenWidth * screenHeight, L"prngState", prngState);
-	auto gpuPRNG = compute_frame.pipes[0].RegisterStructBuffer(prng_Desc, GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES);
+	auto gpuPRNG = compute_frame.pipes[0].RegisterStructBuffer(prng_Desc, resrcRW_Permissions);
 	compute_frame.pipes[0].ResolveRootSignature();
 
 	// Shader registration
 	// Move onto this after verifying resource set-up
 	
-	// One thread for every [AS_NODE_CHILD_COUNT] tris
-	auto csAS_ResolutionHandle = compute_frame.pipes[0].RegisterComputeShader("ComputeAS_Resolve.cso", std::max((numTris / AS_NODE_CHILDCOUNT) / 64, 1u), 1, 1);
+	// One thread/triangle
+	auto csAS_ResolutionHandle = compute_frame.pipes[0].RegisterComputeShader("ComputeAS_Resolve.cso", std::max(numTris / 64u, 1u), 1u, 1u);
 	compute_frame.pipes[0].AppendComputeExec(csAS_ResolutionHandle);
 
 	// Work-submission legwork quietly automates when we call (or JIT if we wait until SubmitCmdList, whichever)
@@ -418,8 +421,8 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	// Bind materials & material metadata ^_^
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc materialTable;
 	materialTable.initForStructBuffer<MaterialPropertyEntry>(sceneMaterialCount, L"materialTable", materialEntries);
-	compute_frame.pipes[1].RegisterStructBuffer(materialTable, GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES); // Kind of incredibly cumbersome - should add support for read-only structbuffers (are they new? they feel new)
-	compute_frame.pipes[1].RegisterStructBuffer(spectralAtlas, GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES);
+	compute_frame.pipes[1].RegisterStructBuffer(materialTable, resrcRW_Permissions); // Kind of incredibly cumbersome - should add support for read-only structbuffers (are they new? they feel new)
+	compute_frame.pipes[1].RegisterStructBuffer(spectralAtlas, resrcRW_Permissions);
 	compute_frame.pipes[1].RegisterTextureSampleable(roughnessAtlas, TEXTURE_ACCESS_DIRECT_READS);
 
 	GPUResource<ResourceViews::TEXTURE_DIRECT_WRITE>::resrc_desc sppCounter;
@@ -451,12 +454,13 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	uavTexDesc.resrcName = L"computeTarget";
 
-	compute_frame.pipes[1].RegisterTextureDirectWrite(sppCounter, GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES);
 	compute_frame.pipes[1].RegisterStructBuffer(tribufferHandle);
 	compute_frame.pipes[1].RegisterStructBuffer(customAS);
 	compute_frame.pipes[1].RegisterStructBuffer(gpuPRNG);
 
-	auto computeTarget = compute_frame.pipes[1].RegisterTextureDirectWrite(uavTexDesc, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_DIRECT_WRITES | GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_DIRECT_READS);
+	compute_frame.pipes[1].RegisterTextureDirectWrite(sppCounter, resrcRW_Permissions);
+
+	auto computeTarget = compute_frame.pipes[1].RegisterTextureDirectWrite(uavTexDesc, resrcRW_Permissions);
 	compute_frame.pipes[1].ResolveRootSignature();
 
 	auto csTestHandle = compute_frame.pipes[1].RegisterComputeShader("ComputeShader.cso", screenWidth / 8, screenHeight / 8, 1); // 64 threads
@@ -536,7 +540,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	CPUMemory::Free(roughnessAtlasData);
 	CPUMemory::Free(materialEntries);
 	CPUMemory::Free(prngState);
-	CPUMemory::Free(octreeAS);
+	CPUMemory::Free(bvhAS);
 	CPUMemory::Free(tribufferMemory);
 }
 

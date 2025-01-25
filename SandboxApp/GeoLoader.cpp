@@ -531,7 +531,7 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 	*params.outSpectralTexWidth = 1024;
 	*params.outSpectralTexHeight = 1024;
 	*params.outSpectralTexFootprint = sizeof(MaterialSPD_Piecewise) * *params.outSpectralTexWidth * *params.outSpectralTexHeight;
-
+	
 	*params.outSpectralTexAddr = CPUMemory::AllocateArray<MaterialSPD_Piecewise>(*params.outSpectralTexWidth * *params.outSpectralTexHeight);
 	CPUMemory::FlushData(*params.outSpectralTexAddr); // BLINDING, Spectralon white, yay
 
@@ -539,12 +539,9 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 	*params.outRoughnessTexWidth = 1024;
 	*params.outRoughnessTexHeight = 1024;
 	*params.outRoughnessFootprint = sizeof(float) * *params.outRoughnessTexWidth * *params.outRoughnessTexHeight;
-
+	
 	*params.outRoughnessTexAddr = CPUMemory::AllocateArray<float>(*params.outRoughnessTexWidth * *params.outRoughnessTexHeight);
 	CPUMemory::ZeroData(*params.outRoughnessTexAddr);
-
-	// Return/end function - all data loaded/generated
-	//////////////////////////////////////////////////
 }
 
 void GeoLoader::LoadDXRS(const char* path, MeshLoadParams params)

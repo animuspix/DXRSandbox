@@ -50,6 +50,12 @@ Scene::Scene(CPUMemory::ArrayAllocHandle<Model> _models, uint32_t _numModels) : 
 		filmCMF.spd_sample[i].z = b;
 		filmCMF.spd_sample[i].w = 0.0f;
 	}
+
+	spp = 16; // Like everything else here, this will be data-driven, eventually ^_^'
+
+	// Not really sure what to set for focal-depth or aberration, sensible-ish placeholders for now
+	focalDepth = 1.0f;
+	aberration = 0.0f;
 }
 
 struct DXRSS_Header
