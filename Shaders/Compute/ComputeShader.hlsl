@@ -171,6 +171,41 @@ bool aabbHit(Ray ray, float3 aabbMin, float3 aabbMax)
     return tMinMax.x <= tMinMax.y;
 }
 
+// Takes per-rank tree coordinates, returns absolute offset within the octree/tribuffer
+uint DecodeOctreeCoordinate(uint currentRank, uint coordinate[6], out bool leafNode)
+{
+    uint currAS_Node = 0;
+    uint currAS_NodeWithBranchFlag = 0;
+    ComputeAS_Node lastParent = bvhAS[0];
+    for (uint i = 1; i < currentRank; i++)
+    {
+        uint childNdx = coordinate[i];
+        currAS_Node = lastParent.children[childNdx];
+        currAS_NodeWithBranchFlag = currAS_Node;
+        
+        currAS_Node &= ~(1<<25); // Should see if I have a define for this somewhere
+        lastParent = bvhAS[currAS_Node];
+    }
+
+    leafNode = currAS_NodeWithBranchFlag & (1<<25);
+    return currAS_Node;
+}
+
+void UpdateOctreeCoordinate(inout uint currentRank, inout uint coordinate[6])
+{
+    // If we have untested children left, check those too
+    if (coordinate[currentRank] < 3)
+    {
+        coordinate[currentRank]++; 
+    }
+    else // If none of the local leaf nodes intersect, mess with the previous rank
+    {
+        coordinate[currentRank] = 0;
+        coordinate[currentRank - 1]++;
+        currentRank--;
+    }
+}
+
 [numthreads(8, 8, 1)]
 void main( uint3 DTid : SV_DispatchThreadID )
 {
@@ -191,7 +226,7 @@ void main( uint3 DTid : SV_DispatchThreadID )
 
     // - Verifying spectral samples & film CMF
     //texOut[DTid.xy] = float4(ResolveSpectralColor(float(DTid.x) / screenWidth, computeCBuffer.screenAndLensOptions.filmSPD), 1.0f);
-    texOut[DTid.xy] = float4(ResolveSpectralColor(spectralSample, computeCBuffer.screenAndLensOptions.filmSPD), 1.0f);
+    //texOut[DTid.xy] = float4(ResolveSpectralColor(spectralSample, computeCBuffer.screenAndLensOptions.filmSPD), 1.0f);
 
     // Verifying triangle intersection
     float3 camPos = computeCBuffer.screenAndLensOptions.cameraTransform.translationAndScale.xyz;
@@ -217,222 +252,75 @@ void main( uint3 DTid : SV_DispatchThreadID )
 
     // Traverse AS
     uint currOctreeRank = 0;
-    bool traversingAS = true;
-    bool asLeaves = false; 
+    bool traversingAS = false; // Skip traversal until AS setup is sorted
 
-    uint octreeProbeHistoryAbsoluteOffsets[6] = { 0, 0, 0, 0, 0, 0 }; // See maxOctreeRank, Render.cpp; should move that definition to a header I can read from HLSL
-    uint octreeProbeHistorySiblingOffsets[6] = { 0, 0, 0, 0, 0, 0 };
-    uint octreeProbeHistoryChildrenMap[6 * 8] = { 0, 0, 0, 0, 0, 0, // 1,2,3,4,5,6,7,8
-                                                  0, 0, 0, 0, 0, 0, // (9...16)...(64...73)
-                                                  0, 0, 0, 0, 0, 0, // etc
-                                                  0, 0, 0, 0, 0, 0,
-                                                  0, 0, 0, 0, 0, 0,
-                                                  0, 0, 0, 0, 0, 0,
-                                                  0, 0, 0, 0, 0, 0,
-                                                  0, 0, 0, 0, 0, 0 };
+    // Tree coordinates of each octree probe/ray; each index is a rank, and their values are offsets within them (max offsets determined by [AS_NODE_CHILDCOUNT])
+    uint octreeProbeCoordinates[6] = { 0, 0, 0, 0, 0, 0 }; // See maxOctreeRank, Render.cpp; should move that definition to a header I can read from HLSL
 
-    // History is wonky and difficult to traverse
-    // Sibling offsets good!
-    // Load children at each rank into a third buffer (octreeProbeHistoryChildrenMap)
-    // Can then consult the buffer to quickly skip empty cells (children that don't have children themselves)
-    // + quickly & unambiguously select siblings with ((currOctreeRank * 8) + octreeProbeHistorySiblingOffsets[currOctreeRank]), and use that
-    // value to update [...AbsoluteOffsets[currOctreeRank]] instead of relying on blind increments for the absolute/sibling offsets that we
-    // forcibly modulo 8
-    // Need to keep thinking about this before implementing anything hmmmmmm
-
-    float4 asRGB = float4(0.0f.xxx, 1.0f);
-
+    float4 asRGBA = float4(1.0f, 0.5f, 0.25f, 0.0f);
     while (traversingAS)
     {
-        asRGB.r = 1.0f;
-        break;
-        uint currAS_Node = octreeProbeHistoryAbsoluteOffsets[currOctreeRank]; // Resolve currAS_Node from current probe history
-        ComputeAS_Node asNode = octreeAS[currAS_Node];
-        bool missRay = false;
+        // Resolve currAS_Node from current probe history
+        bool leafNode = true;
+        uint currAS_Node = DecodeOctreeCoordinate(currOctreeRank, octreeProbeCoordinates, leafNode);
 
-        // Test the current node
-        if (aabbHit(_ray, asNode.bounds[0].xyz, asNode.bounds[1].xyz)) // Need to fill out else statement for this x_x
+        bool currentRankMiss = false;
+        if (leafNode)
         {
-            break;
-            
-            // Load current children into our faux stack/history buffer
-            // Should be safe to run for all nodes...leaf nodes won't get to this AS test anyway ^_^' and we should be able to keep
-            // testing them inline
-            uint currRankChildrenOffs = currOctreeRank * 8;
-            for (uint i = 0; i < 8; i++)
-            {
-                octreeProbeHistoryChildrenMap[currRankChildrenOffs + i] = asNode.children[i];
-            }
+            IndexedTriangle tri = triBuffer[currAS_Node];
+            Vertex3D verts[3] = { structuredVBuffer[tri.xyz.x], structuredVBuffer[tri.xyz.y], structuredVBuffer[tri.xyz.z] };
+            float3x3 vpositions = float3x3(verts[0].pos.xyz, verts[1].pos.xyz, verts[2].pos.xyz);
 
-            // Test the current cell
-            bool hasChildren = asNode.containsTrisEventually == TRUE;
-            bool isBranch = asNode.isBranchNode == TRUE;
+            float distTmp = 0;
+            float3 baryTmp = 0;
+            bool triSectLocal = triHit(vpositions, _ray, distTmp, baryTmp);
+            currentRankMiss = !triSectLocal;
 
-            if (!isBranch) // hmmmm
-            {
-                // A leaf node; should load the parent cell (look at the current ray's history), then iterate over its children
-                for (uint i = 0; i < 8; i++)
+            if (triSectLocal)
+            { 
+                if (distTmp < distance)
                 {
-                    ComputeAS_Node leafNode = octreeAS[asNode.children[i]];
-                    for (uint triLookup = 0; triLookup < leafNode.numChildren; triLookup++)
-                    {
-                        uint triIndex = leafNode.children[triLookup];
-                        IndexedTriangle tri = triBuffer[triIndex];
-                    
-                        Vertex3D verts[3] = { structuredVBuffer[tri.xyz.x], structuredVBuffer[tri.xyz.y], structuredVBuffer[tri.xyz.z] };
-
-                        float3x3 vpositions = float3x3(verts[0].pos.xyz, verts[1].pos.xyz, verts[2].pos.xyz);
-
-                        float distTmp = 0;
-                        float3 baryTmp = 0;
-                        bool triSectLocal = triHit(vpositions, _ray, distTmp, baryTmp);
-
-                        if (triSectLocal)
-                        { 
-                            triSect = true;
-
-                            if (distTmp < distance)
-                            {
-                                distance = distTmp;
-                                bary = baryTmp;
-                                normal = verts[0].normals.xyz * bary.x +
-                                         verts[1].normals.xyz * bary.y +
-                                         verts[2].normals.xyz * bary.z;
-                            }
-
-                            traversingAS = false;
-                            asRGB.r = 1.0f;
-                        }
-                    }
+                    distance = distTmp;
+                    bary = baryTmp;
+                    normal = verts[0].normals.xyz * bary.x +
+                             verts[1].normals.xyz * bary.y +
+                             verts[2].normals.xyz * bary.z;
                 }
 
-                // Successful intersections take care of themselves; failed intersections mean we need to change sibling & absolute offsets
-                if (traversingAS)
-                {
-                    uint currSiblingOffset = octreeProbeHistorySiblingOffsets[currOctreeRank];
-                    if (currSiblingOffset == 7)
-                    {
-                        octreeProbeHistorySiblingOffsets[currOctreeRank] = 0;
-                        octreeProbeHistoryAbsoluteOffsets[currOctreeRank] = 0;
-                        currOctreeRank--;
-
-                        octreeProbeHistorySiblingOffsets[currOctreeRank]++; // We overflowed the sibliings on the current rank, so try a different sibling on the prior rank
-                        
-                        // Need a has-children test here! (+ extracting childLookup, not loading the bithacked values directly)
-                        uint nextSiblingOffset = octreeProbeHistorySiblingOffsets[currOctreeRank];
-                        octreeProbeHistoryAbsoluteOffsets[currOctreeRank] = octreeProbeHistoryChildrenMap[(currOctreeRank * 8) + nextSiblingOffset];
-                    }
-                    else
-                    {
-                        octreeProbeHistorySiblingOffsets[currOctreeRank]++;
-
-                        // Need a has-children test here! (+ extracting childLookup, not loading the bithacked values directly)
-                        octreeProbeHistoryAbsoluteOffsets[currOctreeRank] = octreeProbeHistoryChildrenMap[(currOctreeRank * 8) + octreeProbeHistorySiblingOffsets[currOctreeRank]];
-                    }
-                }
+                triSect = true;
+                traversingAS = false;
+                asRGBA.g = 1.0f; // Green tint for triangle hits
             }
-            else if (hasChildren)
-            {
-                // Advance to the next rank (see above [if(traversingAS) { ... }] )
-                octreeProbeHistorySiblingOffsets[currOctreeRank + 1] = 0;
-                //octreeProbeHistoryAbsoluteOffsets[currOctreeRank + 1] = childLookup;
-                currOctreeRank++;                
-            }
-            else // Walk around the current rank (see above [if(traversingAS) { ... }] )
-            {
-                if (octreeProbeHistorySiblingOffsets[currOctreeRank] == 7)
-                {
-                    // Nothing in the current rank has intersected; reverse to the previous rank
-                    // hmmm
-                    // what do when ray misses geometry? how know when ray misses geometry completely?
-                    // not sure - may just break here instead, for now
-                    break;
-                }
-
-                octreeProbeHistorySiblingOffsets[currOctreeRank]++;
-                octreeProbeHistoryAbsoluteOffsets[currOctreeRank]++;
-            }
-        }
-        else if (currAS_Node == 0) // Missed the root node, nothing to intersect/test
-        {
-            break;
         }
         else
         {
-            // Hit the root node, missed some child nodes...hmmmm
-            // try nearby nodes for now (see above [if(traversingAS) { ... }] )
+            ComputeAS_Node asNode = bvhAS[currAS_Node];
+            bool missRay = false;
 
-            uint currSiblingOffset = octreeProbeHistorySiblingOffsets[currOctreeRank];
-            if (currSiblingOffset == 7)
+            // Test the current node
+            currentRankMiss = !aabbHit(_ray, asNode.bounds[0].xyz, asNode.bounds[1].xyz);
+            if (!currentRankMiss)
             {
-                octreeProbeHistorySiblingOffsets[currOctreeRank] = 0;
-                octreeProbeHistoryAbsoluteOffsets[currOctreeRank] = 0;
-                octreeProbeHistoryAbsoluteOffsets[currOctreeRank - 1]++; // Test the next sibling in the previous rank
-                currOctreeRank--;
-            }
-            else
-            {
-                octreeProbeHistorySiblingOffsets[currOctreeRank]++;
-                octreeProbeHistoryAbsoluteOffsets[currOctreeRank]++;
+                // Move to the next rank
+                currOctreeRank++;
             }
         }
 
-        if (currOctreeRank >= 5 && traversingAS)
+        if (currentRankMiss)
         {
-            triSect = true;
-            asRGB.g = 1.0f;
-            break;
+            // If the current ray misses all children of the root node, the ray has missed entirely
+            traversingAS = currOctreeRank == 1 ? (octreeProbeCoordinates[1] < 3) : true;
+            if (traversingAS)
+            {
+                // Try another child on the same rank; if no more children, retreat to the previous rank
+                UpdateOctreeCoordinate(currOctreeRank, octreeProbeCoordinates);        
+
+                // Blue tint for miss rays
+                asRGBA.b = 1.0f;
+            }
         }
     }
-
-    /*for (uint i = 0; i < 12; i++) // Loop through indexed triangles
-    {
-        // Replace these lookups with triangle indices derived from our BVH
-        IndexedTriangle tri = triBuffer[i];
-
-        // Load triangles from indices, break on first intersection
-        Vertex3D verts[3] = { structuredVBuffer[tri.xyz.x], structuredVBuffer[tri.xyz.y], structuredVBuffer[tri.xyz.z] };
-        float3x3 vpositions = float3x3(verts[0].pos.xyz, verts[1].pos.xyz, verts[2].pos.xyz);
-          
-        float distTmp = 0;
-        float3 baryTmp = 0;
-        bool triSectLocal = triHit(vpositions, _ray, distTmp, baryTmp);
-
-        if (triSectLocal)
-        {
-            triSect = true;
-            
-            if (distTmp < distance)
-            {
-                distance = distTmp;
-                bary = baryTmp;
-                normal = verts[0].normals.xyz * bary.x +
-                         verts[1].normals.xyz * bary.y +
-                         verts[2].normals.xyz * bary.z;
-            }
-        }
-    }*/
     
-    if (triSect)
-    {
-        float3 col = asRGB.rgb * rand(prngChannel); //+ abs(normal);
-
-//#define DBG_DEPTH_FOG
-#ifdef DBG_DEPTH_FOG
-        col = 1.0f.xxx;
-        col /= distance;
-#endif
-
-        texOut[DTid.xy] = float4(col, 0.0f);
-    }
-    else
-    {
-        // Debug orange
-        texOut[DTid.xy] = float4(1.0f, 0.5f, 0.25f, 1.0f);
-    }
-
+    texOut[DTid.xy] = asRGBA;
     prngPathStreams[linPixID] = prngChannel;
-
-    // After;
-    // - AS debugging (!!!)
 }
