@@ -13,6 +13,28 @@ struct Alloc
 {
 	char* destPtr;
 	uint64_t size;
+
+	// For handle updates on memory free
+	// When pointers within the alloc buffer are freed, the pointers allocated after them are reordered,
+	// making internal handles unstable and difficult to traverse without retracing all the reorders
+	// performed by the allocator up to that point
+	//
+	// However, external handles never change (they *can't* change, or pointer invalidation would be
+	// a constant issue, and memory as perceived by the client would only be loosely associated
+	// with memory as perceived by the allocator)
+	//
+	// Previous versions of the allocator addressed the internal handle unreliability issue by directly
+	// encoding pointers to the internal handles associated with every alloc, and chasing the pointers
+	// during frees to correct those handles for data allocated beyond the alloc being freed; that
+	// was simple and effective, but difficult to understand at a glance, and I eventually removed
+	// those lines when I came back to the code after an extended break (assuming they were 
+	// useless/cruft)
+	//
+	// Hopefully this solution is more straightforward and less likely to end up binned; we store
+	// the unchanging external handles on each alloc, and use those to directly access & patch
+	// [handleConvertExternalInternal], instead of going through the sneaky indirection we used 
+	// before
+	CPUMemory::AllocHandle externalHandle;
 };
 
 struct AllocBuffer
@@ -40,10 +62,10 @@ Alloc FindHandleAlloc(AllocBuffer* allocs, CPUMemory::AllocHandle handle, CPUMem
 CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, char* destPtr, uint64_t size);
 void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handle, char** nextAllocAddress);
 
-extern AllocBuffer* allocs = nullptr; // Prone to corruption when all client data freed, somehow...
+extern AllocBuffer* allocs = nullptr;
 
 static uint64_t memUsed = 0;
-static uint64_t clientDataOffset = sizeof(AllocBuffer) + scratchFootprint;
+static uint64_t clientDataOffset = sizeof(AllocBuffer);
 
 #ifdef MEM_MGR_TEST
 //#define LOG_MEM_TESTS
@@ -171,8 +193,15 @@ CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, char* destPtr, uint64_t siz
 	CPUMemory::AllocHandle handle = allocs->numHandles;
 	allocs->handleConvertExternalInternal[handle] = allocs->numAllocs;
 
+	// Needed for frees; internal handles need to be updated when they occur, but can't be straightforwardly iterated because of
+	// drift between external and internal orderings once repeated frees have occurred (so we keep thee external handle around,
+	// and traverse the internal handles through the look-up we assigned above, instead)
+	allocs->allocSet[allocs->numAllocs].externalHandle = handle;
+
 	allocs->numAllocs++;
 	allocs->numHandles++;
+
+	assert(handle < AllocBuffer::maxNumHandles);
 
 	return handle;
 }
@@ -216,6 +245,12 @@ void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handl
 		for (uint32_t i = ndx; i < (allocs->numAllocs - 1); i++)
 		{
 			std::swap(allocs->allocSet[i], allocs->allocSet[i + 1]);
+		}
+
+		// Update internal handles
+		for (uint32_t i = (ndx + 1); i < allocs->numAllocs; i++)
+		{
+			allocs->handleConvertExternalInternal[allocs->allocSet[i].externalHandle]--;
 		}
 
 		// Update the next allocation address
