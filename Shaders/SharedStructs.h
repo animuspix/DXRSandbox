@@ -42,8 +42,9 @@ struct ComputeAS_Node
 	float4 bounds[2]; // 16x2 bytes (32)
 
 	// Children are either triangle indices (bit 25 zero), or indices to another node (bit 25 set)
-	// Bit 26 determines if child indices are active or not
-	// Using an octree AS now, so each node has (up to) eight children
+	// Triangle count in the scene won't always be divisible by AS_NODE_CHILDCOUNT; if so, the remaining
+	// child indices are set as copies of the last defined one
+	// (so if the last node in the tree contains a single triangle index, children 1-3 carry copies of that index)
 	uint children[AS_NODE_CHILDCOUNT]; // 4x4 bytes (16)
 };
 

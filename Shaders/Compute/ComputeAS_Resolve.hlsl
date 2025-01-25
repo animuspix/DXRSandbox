@@ -40,7 +40,7 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
 
     // Assumes normalized vertex positions (no premultiplied scale or whatever)
     uint mortonBitDepth = 10u;
-    uint3 centreMorton = uint3((centre * float3(1u << mortonBitDepth))); // We want 3 slices in the Morton code, ten bits each
+    uint3 centreMorton = uint3((centre * (1u << mortonBitDepth))); // We want 3 slices in the Morton code, ten bits each
     centreMorton &= 1023; // Zero bits 11-31 in each axis
 
     // Interleave!
@@ -113,7 +113,7 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
     InterlockedMax(triBuffer[0].xyz.x, centreMortonPacked);
     AllMemoryBarrierWithGroupSync();
 
-    uint maxMorton = triBuffer[index].xyz.x;
+    uint maxMorton = triBuffer[0].xyz.x;
     float mortonRelative = float(centreMortonPacked) / float(maxMorton);
     float sortingNdx = mortonRelative * numTris;
 
@@ -161,7 +161,17 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
     // Actual approach for the current octree
     // - test all (triCount / childCount) nodes for AABB intersection
 
-    ComputeAS_Node currentNode = octreeAS[sortingNdx / AS_NODE_CHILDCOUNT];
+    // Drop intermediate threads in each gather pass
+    uint rankSize = numTris / AS_NODE_CHILDCOUNT;
+    if (sortingNdx % rankSize != 0)
+    {
+        return;
+    }
+
+    // Should compute node offset here
+    uint nodeOffset = 0;
+    uint nodeNdx = sortingNdx / AS_NODE_CHILDCOUNT;
+    ComputeAS_Node currentNode = bvhAS[nodeNdx]; // How to handle contention here? Drop intermediate threads?
     currentNode.bounds[0].xyz = float3(min(min(vt0.x, vt1.x), vt2.x), 
                                        min(min(vt0.y, vt1.y), vt2.y),
                                        min(min(vt0.z, vt1.z), vt2.z));
@@ -177,38 +187,90 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
 
     for (uint i = 1; i < AS_NODE_CHILDCOUNT; i++)
     {
-        IndexedTriangle childTri = triBuffer[sortingNdx + i];
+        uint nextTri = sortingNdx + i;
+        if (nextTri < numTris)
+        {
+            IndexedTriangle childTri = triBuffer[nextTri];
 
-        float3 childVt0 = structuredVBuffer[childTri.xyz.x].pos.xyz;
-        float3 childVt1 = structuredVBuffer[childTri.xyz.y].pos.xyz;
-        float3 childVt2 = structuredVBuffer[childTri.xyz.z].pos.xyz;
+            float3 childVt0 = structuredVBuffer[childTri.xyz.x].pos.xyz;
+            float3 childVt1 = structuredVBuffer[childTri.xyz.y].pos.xyz;
+            float3 childVt2 = structuredVBuffer[childTri.xyz.z].pos.xyz;
 
-        float3 triMins = float3(min(min(childVt0.x, childVt1.x), childVt2.x), 
-                                min(min(childVt0.y, childVt1.y), childVt2.y),
-                                min(min(childVt0.z, childVt1.z), childVt2.z));
+            float3 triMins = float3(min(min(childVt0.x, childVt1.x), childVt2.x), 
+                                    min(min(childVt0.y, childVt1.y), childVt2.y),
+                                    min(min(childVt0.z, childVt1.z), childVt2.z));
 
-        float3 triMaxes = float3(max(max(childVt0.x, childVt1.x), childVt2.x), 
-                                 max(max(childVt0.y, childVt1.y), childVt2.y),
-                                 max(max(childVt0.z, childVt1.z), childVt2.z));
+            float3 triMaxes = float3(max(max(childVt0.x, childVt1.x), childVt2.x), 
+                                     max(max(childVt0.y, childVt1.y), childVt2.y),
+                                     max(max(childVt0.z, childVt1.z), childVt2.z));
 
-        currentNode.bounds[0].xyz = min(triMins, currentNode.bounds[0].xyz);                                
-        currentNode.bounds[1].xyz = max(triMaxes, currentNode.bounds[1].xyz);
+            currentNode.bounds[0].xyz = min(triMins, currentNode.bounds[0].xyz);                                
+            currentNode.bounds[1].xyz = max(triMaxes, currentNode.bounds[1].xyz);
 
-        currentNode.children[i] = sortingNdx + i;
+            currentNode.children[i] = nextTri;
+        }
+        else
+        {
+            currentNode.children[i] = nextTri - 1;
+        }
     }
 
-    // Test the above AABBs in the compute shader/in PIX before grouping further
+    // Can do some maths to reorder tree layout here (from leaves -> branches to branches -> leaves)
+    bvhAS[nodeNdx] = currentNode;
+    nodeOffset = rankSize;
+
+    // Need to gather nodes/tris up to the root in order to test traversal code;
+    // Something to work on next time maybe? Off to help with dins
+
     // Might be worthwhile to implement a simple debug mode that terminates on AABB hits
     // & shades with box normals, to better visualize the generated BVH layout
 
-    // Memory barrier
-    //AllMemoryBarrierWithGroupSync(); // Might be overkill
+    // Increasingly linear work here, as gathering continues; probably best to continue dropping intermediate threads, but not sure rllyyyy
 
+    // Seems to make sense, need to open PIX to check
+    
     // Recurrent passes; sort boxes into bigger boxes
-    //uint maxRanks = getMaxBVHRanks(numTris);
+    uint maxRanks = getMaxBVHRanks(numTris);
 
-    //for (uint rankNdx = 0; rankNdx < maxRanks; rankNdx++)
-    //{
-    //    AllMemoryBarrierWithGroupSync(); // Might be overkill
-    //}
+    // First rank (leaf nodes - unsure about ordering there) covered above
+    for (uint rankNdx = 1; rankNdx < maxRanks; rankNdx++)
+    {        
+        // Continue dropping intermediate threads
+        uint prevRankSize = rankSize;
+        rankSize /= AS_NODE_CHILDCOUNT;
+        if (nodeNdx % rankSize != 0)
+        {
+            return;
+        }
+
+        // Sync remainder
+        AllMemoryBarrierWithGroupSync();
+
+        uint sentry = nodeNdx; // Marks four adjacent children, to be collected by the current parent node
+        nodeNdx /= AS_NODE_CHILDCOUNT;
+        nodeOffset += rankSize;            
+
+        // Sweep through the previous rank to gather nodes
+        currentNode = bvhAS[nodeNdx + nodeOffset];
+        for (uint i = 0; i < AS_NODE_CHILDCOUNT; i++)
+        {
+            uint nextChildNode = sentry + i;
+            if (nextChildNode < prevRankSize)
+            {
+                ComputeAS_Node child = bvhAS[nextChildNode];
+
+                currentNode.bounds[0].xyz = min(child.bounds[0].xyz, currentNode.bounds[0].xyz);                                
+                currentNode.bounds[1].xyz = max(child.bounds[1].xyz, currentNode.bounds[1].xyz);
+
+                currentNode.children[i] = nextChildNode;               
+            }
+            else
+            {
+                currentNode.children[i] = nextChildNode - 1;
+            }
+        }       
+
+        // Write out node data to the bvhAS
+        bvhAS[nodeNdx + nodeOffset] = currentNode;
+    }
 }

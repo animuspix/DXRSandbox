@@ -34,12 +34,12 @@ RWStructuredBuffer<Vertex3D> structuredVBuffer : register(u0);
 
 #ifdef AS_RESOLVE_PASS
 	RWStructuredBuffer<IndexedTriangle> triBuffer : register(u1); // Indexed by grid acceleration structure
-	RWStructuredBuffer<ComputeAS_Node> octreeAS : register(u2); // Read by shading passes, written by AS resolve
+	RWStructuredBuffer<ComputeAS_Node> bvhAS : register(u2); // Read by shading passes, written by AS resolve
 	RWStructuredBuffer<GPU_PRNG_Channel> prngPathStreams : register(u3);
 #else
 #ifdef SHADING_PASS
 	RWStructuredBuffer<IndexedTriangle> triBuffer : register(u3); // Indexed by grid acceleration structure
-	RWStructuredBuffer<ComputeAS_Node> octreeAS : register(u4); // Read by shading passes, written by AS resolve
+	RWStructuredBuffer<ComputeAS_Node> bvhAS : register(u4); // Read by shading passes, written by AS resolve
 	RWStructuredBuffer<GPU_PRNG_Channel> prngPathStreams : register(u5);
 #endif
 #endif
