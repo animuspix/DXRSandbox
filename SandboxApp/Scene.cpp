@@ -95,7 +95,12 @@ Scene::Scene(const char* path)
 
 	// Load models
 	modelData = CPUMemory::AllocateArray<Model>(numModels);
-	scene.read(reinterpret_cast<char*>(&modelData.GetBytesHandle()[0]), numModels * sizeof(Model));
+	
+	CPUMemory::MemSize modelFootprint = 0;
+	char* modelBytes = static_cast<char*>(modelData.GetByteSpan().Bytes(modelFootprint));
+	assert(modelFootprint == numModels * sizeof(Model));
+
+	scene.read(modelBytes, modelFootprint);
 	models = modelData;
 
 	// Release memory
@@ -114,5 +119,7 @@ void Scene::EncodeScene(const char* path)
 	scene.write(reinterpret_cast<char*>(&header), sizeof(header));
 
 	// Encode models
-	scene.write(reinterpret_cast<char*>(&models.GetBytesHandle()[0]), numModels * sizeof(Model));
+	CPUMemory::MemSize modelFootprint = 0;
+	char* modelBytes = static_cast<char*>(modelData.GetByteSpan().Bytes(modelFootprint));
+	scene.write(modelBytes, modelFootprint);
 }

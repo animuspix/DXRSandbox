@@ -1086,17 +1086,20 @@ void DXWrapper::NameResourceInternal(uint64_t resrcID, LPCWSTR name)
 	resources[resrcID].resrc->SetName(name);
 }
 
-void DXWrapper::UpdateCBufferData(DataHandle<D3D_CBUFFER> handle, CPUMemory::ArrayAllocHandle<uint8_t> data)
+void DXWrapper::UpdateCBufferData(DataHandle<D3D_CBUFFER> handle, CPUMemory::ByteSpan data)
 {
+	CPUMemory::MemSize srcLength = 0;
+	void* srcAddr = data.Bytes(srcLength);
+
 	D3D12_RANGE readRange = {};
 	void* copyDst = nullptr;
 
 	D3D12_RANGE writeRange;
 	writeRange.Begin = 0;
-	writeRange.End = static_cast<SIZE_T>(data.arrayLen);
+	writeRange.End = static_cast<SIZE_T>(srcLength);
 	
 	resources[handle.index].resrc->Map(0, &readRange, &copyDst);
-	CPUMemory::CopyData(data, copyDst);
+	memcpy(copyDst, srcAddr, srcLength);
 	resources[handle.index].resrc->Unmap(0, &writeRange); // Not sure about scheduling these hmmmm - might want to queue between frames
 }
 
@@ -1483,7 +1486,7 @@ DXWrapper::DataHandle<D3D_PSO> DXWrapper::GenerateRayPSO(const char* precompiled
 	exports[2].Name = missStageName;
 	exports[2].Flags = D3D12_EXPORT_FLAG_NONE;
 
-	dxilDesc->pExports = &*exports; // This is guaranteed to produce address corruption when the data moves ^_^' need to use a wrapper type
+	dxilDesc->pExports = &exports[0]; // This is guaranteed to produce address corruption when the data moves ^_^' need to use a wrapper type
 
 	// More linker markup :D
 	// (hit group set-up now, technically different from the dxil exports we marked up before)
@@ -1583,7 +1586,7 @@ uint64_t AlignResrcFootprint(uint64_t footprint, uint64_t alignment)
 	return footprint + alignOffset;
 }
 
-void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3D12_CLEAR_VALUE* clearVal, uint64_t resrcFootprint, bool cbuffer, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t resrcOffset)
+void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3D12_CLEAR_VALUE* clearVal, uint64_t resrcFootprint, bool cbuffer, CPUMemory::ByteSpan srcData, uint32_t resrcOffset)
 {
 	// Following:
 	// https://docs.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createplacedresource
@@ -1595,7 +1598,7 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 		heapOffsets[UPLOAD_HEAP] += AlignResrcFootprint(resrcFootprint, desc.Alignment);
 	}
 
-	if (srcData.handle != CPUMemory::emptyAllocHandle)
+	if (srcData.HasDefinedElements())
 	{
 		// Prepare read/write ranges
 		D3D12_RANGE readRange;
@@ -1713,7 +1716,7 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 			// No persistent mapping because I don't want to think about GPU concurrency/scheduling
 			// Following "Simple Usage Models" here
 			// https://docs.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12resource-map
-			if (srcData.handle != CPUMemory::emptyAllocHandle)
+			if (srcData.HasDefinedElements())
 			{
 				void* memMap = nullptr;
 				resources[resrcOffset].resrc->Map(0, &readRange, &memMap);
@@ -1791,7 +1794,7 @@ D3D12_RESOURCE_FLAGS DecodeTextureAccessPermissions(GPUResrcPermSetTextures perm
 	}
 }
 
-DXWrapper::DataHandle<D3D_CBUFFER> DXWrapper::GenerateConstantBuffer(uint32_t footprint, GPUResrcPermSetGeneric permissions, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID)
+DXWrapper::DataHandle<D3D_CBUFFER> DXWrapper::GenerateConstantBuffer(uint32_t footprint, GPUResrcPermSetGeneric permissions, CPUMemory::ByteSpan srcData, uint32_t pipelineID)
 {
 	// Fill-out resource description
 	D3D12_RESOURCE_DESC resrcDesc;
@@ -1823,7 +1826,7 @@ DXWrapper::DataHandle<D3D_CBUFFER> DXWrapper::GenerateConstantBuffer(uint32_t fo
 	return handle;
 }
 
-DXWrapper::DataHandle<D3D_STRUCTBUFFER> DXWrapper::GenerateStructuredBuffer(uint32_t footprint, uint32_t stride, uint32_t numElements, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID)
+DXWrapper::DataHandle<D3D_STRUCTBUFFER> DXWrapper::GenerateStructuredBuffer(uint32_t footprint, uint32_t stride, uint32_t numElements, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID)
 {
 	// Structured buffers are assumed to be accessible through UAVs (as in D3D11)
 	// May not be true, see RWStructuredBuffer vs StructuredBuffer decls in HLSL
@@ -1860,7 +1863,7 @@ DXWrapper::DataHandle<D3D_STRUCTBUFFER> DXWrapper::GenerateStructuredBuffer(uint
 	return handle;
 }
 
-DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateStandardTexture(uint32_t width, uint32_t height, StandardResrcFmts fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, TextureViews textureVariant, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID)
+DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateStandardTexture(uint32_t width, uint32_t height, StandardResrcFmts fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, TextureViews textureVariant, CPUMemory::ByteSpan srcData, uint32_t pipelineID)
 {
 	// Verification!
 	// Require texture views to support corresponding permissions
@@ -1933,7 +1936,7 @@ DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateStandardTexture(uint32_t w
 	return handle;
 }
 
-DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateDepthStencilTexture(uint32_t width, uint32_t height, StandardDepthStencilFormats fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID)
+DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateDepthStencilTexture(uint32_t width, uint32_t height, StandardDepthStencilFormats fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID)
 {
 	assert(accessSettings & TEXTURE_ACCESS_AS_DEPTH_STENCIL); // Depth stencil textures must support depth-stencil accesses ^_^'
 
@@ -1974,7 +1977,7 @@ DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateDepthStencilTexture(uint32
 	return handle;
 }
 
-DXWrapper::DataHandle<D3D_IBUFFER> DXWrapper::GenerateIndexBuffer(uint32_t footprint, StandardIBufferFmts fmt, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID)
+DXWrapper::DataHandle<D3D_IBUFFER> DXWrapper::GenerateIndexBuffer(uint32_t footprint, StandardIBufferFmts fmt, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID)
 {
 	// Fill-out resource description
 	D3D12_RESOURCE_DESC resrcDesc;
@@ -2011,7 +2014,7 @@ DXWrapper::DataHandle<D3D_IBUFFER> DXWrapper::GenerateIndexBuffer(uint32_t footp
 	return handle;
 }
 
-DXWrapper::DataHandle<D3D_VBUFFER> DXWrapper::GenerateVertexBuffer(uint32_t footprint, uint32_t stride, uint32_t numElts, StandardResrcFmts* eltFmts, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID)
+DXWrapper::DataHandle<D3D_VBUFFER> DXWrapper::GenerateVertexBuffer(uint32_t footprint, uint32_t stride, uint32_t numElts, StandardResrcFmts* eltFmts, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID)
 {
 	// Fill-out resource description
 	D3D12_RESOURCE_DESC resrcDesc;

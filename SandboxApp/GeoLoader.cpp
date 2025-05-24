@@ -69,9 +69,11 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 {
 	// Open stream to data, get file size
 	std::fstream strm(path);
-	uint64_t pathBytes = std::filesystem::file_size(path);
+	const uintmax_t fsize = std::filesystem::file_size(path);
+	assert(fsize < CPUMemory::memSizeLimit);
 
 	// Load model data
+	const CPUMemory::MemSize pathBytes = static_cast<CPUMemory::MemSize>(fsize);
 	CPUMemory::ArrayAllocHandle<char> modelData = CPUMemory::AllocateArray<char>(pathBytes);
 	strm.read(&modelData[0], pathBytes);
 	const size_t strmLen = strm.gcount(); // Varying newlines across platforms mean reported file size can be larger (but probably not smaller) than actual readable size
@@ -362,8 +364,8 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 				//
 
 				// Triangulate geometric indices
-				const uint triA[3] = { geoQuad[0], geoQuad[1], geoQuad[2] };
-				const uint triB[3] = { geoQuad[2], geoQuad[3], geoQuad[0] };
+				const uint64_t triA[3] = { geoQuad[0], geoQuad[1], geoQuad[2] };
+				const uint64_t triB[3] = { geoQuad[2], geoQuad[3], geoQuad[0] };
 
 				triNdces[triNdcesFront] = triA[2];
 				triNdces[triNdcesFront + 1] = triA[1];
@@ -547,18 +549,23 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 void GeoLoader::LoadDXRS(const char* path, MeshLoadParams params)
 {
 	std::fstream strm(path, std::ios_base::binary);
-	const uint64_t pathBytes = std::filesystem::file_size(path);
+	const uintmax_t fsize = std::filesystem::file_size(path);
+	assert(fsize < CPUMemory::memSizeLimit);
 
+	const CPUMemory::MemSize pathBytes = static_cast<CPUMemory::MemSize>(fsize);
 	auto fileLocal = CPUMemory::AllocateArray<char>(pathBytes);
 	strm.read(&fileLocal[0], pathBytes);
 
-	uint64_t fOffset = 0;
+	CPUMemory::MemOffset fOffset = 0;
 
 	// Load header
 	DXRS_Header header = {};
 	memcpy(&header, &fileLocal[0], sizeof(header));
-	*(params.outNumVts) = header.numVts;
-	*(params.outNumNdces) = header.numNdces;
+	*(params.outNumVts) = static_cast<CPUMemory::MemSize>(header.numVts);
+	*(params.outNumNdces) = static_cast<CPUMemory::MemSize>(header.numNdces);
+
+	assert(header.numVts * sizeof(Geo::Vertex3D) < CPUMemory::memSizeLimit);
+	assert(header.numNdces * sizeof(Geo::Vertex3D) < CPUMemory::memSizeLimit);
 
 	*(params.outSpectralTexFootprint) = header.spectralTexFootprint;
 	*(params.outSpectralTexWidth) = header.spectralTexWidth;
@@ -575,7 +582,9 @@ void GeoLoader::LoadDXRS(const char* path, MeshLoadParams params)
 	fOffset += sizeof(header);
 
 	// Copy-out verts
-	uint64_t vtCtr = header.numVts;
+	CPUMemory::MemSize vtCtr = static_cast<CPUMemory::MemSize>(header.numVts);
+	assert(header.numVts < CPUMemory::memSizeLimit);
+
 	char* verts = &(fileLocal + fOffset)[0];
 	while (vtCtr > 0)
 	{
@@ -603,17 +612,26 @@ void GeoLoader::LoadDXRS(const char* path, MeshLoadParams params)
 
 	// Copy-out ndces
 	char* ndces = &(fileLocal + fOffset)[0];
-	uint64_t ndxFootprint = sizeof(uint32_t) * header.numNdces;
-	memcpy(params.outNdces, ndces, ndxFootprint);
-	fOffset += ndxFootprint;
+	CPUMemory::MemSize indexSrcFootprint = sizeof(uint32_t) * static_cast<CPUMemory::MemSize>(header.numNdces);
+	assert(header.numNdces < CPUMemory::memSizeLimit);
+
+	CPUMemory::MemSize indexDstFootprint = 0;
+	auto dstSpan = params.outNdces.GetByteSpan();
+	auto dstBytes = dstSpan.Bytes(indexDstFootprint);
+	assert(indexDstFootprint >= indexSrcFootprint);
+
+	memcpy(dstBytes, ndces, indexSrcFootprint);
+	fOffset += indexSrcFootprint;
 
 	// Copy-out spectral data
 	char* spectra = &(fileLocal + fOffset)[0];
 	CPUMemory::CopyData(spectra, *params.outSpectralTexAddr);
-	fOffset += header.spectralTexFootprint;
+	fOffset += static_cast<CPUMemory::MemSize>(header.spectralTexFootprint);
+	assert(header.spectralTexFootprint < CPUMemory::memSizeLimit);
 
 	// Copy-out roughness data
 	char* roughness = &(fileLocal + fOffset)[0];
 	CPUMemory::CopyData(roughness, *params.outRoughnessTexAddr);
-	fOffset += header.roughnessTexFootprint;
+	fOffset += static_cast<CPUMemory::MemSize>(header.roughnessTexFootprint);
+	assert(header.roughnessTexFootprint < CPUMemory::memSizeLimit);
 }

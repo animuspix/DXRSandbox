@@ -228,7 +228,8 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	// Not needed after all; we can compute & stash the max z-value entirely on GPU using some barrier/InterlockedX trickery
 
-	uint64_t* sourceNdces = reinterpret_cast<uint64_t*>(&sceneGeo.ibufferDesc.srcData[0]);
+	CPUMemory::MemSize sourceNdxFootprint = 0;
+	uint32_t* sourceNdces = static_cast<uint32_t*>(sceneGeo.ibufferDesc.srcData.Bytes(sourceNdxFootprint));
 	auto tribufferMemory = CPUMemory::AllocateArray<IndexedTriangle>(numTris);
 	for (uint32_t i = 0; i < numTris; i++)
 	{
@@ -239,7 +240,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 		tribufferMemory[i].xyz.w = 0;
 	}
 
-	structuredTribufferDesc.initForStructBuffer(numTris, sizeof(IndexedTriangle), L"structuredTribuffer", tribufferMemory.GetBytesHandle());
+	structuredTribufferDesc.initForStructBuffer(numTris, sizeof(IndexedTriangle), L"structuredTribuffer", tribufferMemory.GetByteSpan());
 	auto tribufferHandle = compute_frame.pipes[0].RegisterStructBuffer(structuredTribufferDesc, resrcRW_Permissions);
 
 	// AS write-out (16M cells, at most two children each)
@@ -259,7 +260,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 		return numCells;
 	};
 	
-	const uint64_t numCells = computeNumBvhCells(numTris); // Up to eight children per node, supporting more than 1M triangles feels unnecessary
+	const CPUMemory::MemSize numCells = computeNumBvhCells(numTris); // Up to eight children per node, supporting more than 1M triangles feels unnecessary
 	CPUMemory::ArrayAllocHandle<ComputeAS_Node> bvhAS = CPUMemory::AllocateArray<ComputeAS_Node>(numCells);
  
 	// GPU bvh setup plans:
@@ -366,6 +367,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	const uint32_t spectralAtlasFootprint = spectralAtlas.dimensions[0] * spectralAtlas.stride;
 	const uint32_t roughnessAtlasFootprint = roughnessAtlas.dimensions[0] * roughnessAtlas.dimensions[1] * roughnessAtlas.stride;
 
+	// Incredibly hacky to use byte arrays here; we should use typed arrays & array subsets instead, then extract ByteSpans for upload
 	CPUMemory::ArrayAllocHandle<uint8_t> spectralAtlasData = CPUMemory::AllocateArray<uint8_t>(spectralAtlasFootprint);
 	CPUMemory::ArrayAllocHandle<uint8_t> roughnessAtlasData = CPUMemory::AllocateArray<uint8_t>(roughnessAtlasFootprint);
 	CPUMemory::ArrayAllocHandle<MaterialPropertyEntry> materialEntries = CPUMemory::AllocateArray<MaterialPropertyEntry>(sceneMaterialCount);
@@ -415,8 +417,8 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 		atlasX_OffsRoughness += roughnessSubresrcWidth;
 	}
 
-	spectralAtlas.srcData = spectralAtlasData;
-	roughnessAtlas.srcData = roughnessAtlasData;
+	spectralAtlas.srcData = spectralAtlasData.GetByteSpan();
+	roughnessAtlas.srcData = roughnessAtlasData.GetByteSpan();
 
 	// Bind materials & material metadata ^_^
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc materialTable;
@@ -435,7 +437,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	sppCounter.msaa.forcedSamples = 1;
 	sppCounter.msaa.qualityTier = 0;
 	sppCounter.resrcName = L"sampleCountsPerPixel";
-	sppCounter.srcData.handle = CPUMemory::emptyAllocHandle;
+	sppCounter.srcData = {};
 
 	GPUResource<ResourceViews::TEXTURE_DIRECT_WRITE>::resrc_desc uavTexDesc;
 	uavTexDesc.fmt = StandardResrcFmts::FP16_4;
@@ -449,8 +451,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	uavTexDesc.msaa.forcedSamples = 1;
 	uavTexDesc.msaa.qualityTier = 0;
 
-	uavTexDesc.srcData.handle = CPUMemory::emptyAllocHandle;
-	uavTexDesc.srcData.arrayLen = 0;
+	uavTexDesc.srcData = {};
 
 	uavTexDesc.resrcName = L"computeTarget";
 
@@ -485,8 +486,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	depthTexDesc.msaa.forcedSamples = 1;
 	depthTexDesc.msaa.qualityTier = 0;
 
-	depthTexDesc.srcData.handle = CPUMemory::emptyAllocHandle;
-	depthTexDesc.srcData.arrayLen = 0;
+	depthTexDesc.srcData = {};
 
 	depthTexDesc.resrcName = L"depthTex";
 
@@ -548,13 +548,8 @@ void Render::UpdateFrameConstants(CPUMemory::SingleAllocHandle<FrameConstants> f
 {
 	UpdateComputeConstants(frameConstants);
 
-	CPUMemory::ArrayAllocHandle<uint8_t> bytesHandle = {};
-	bytesHandle.arrayLen = sizeof(ComputeTypes::ComputeConstants);
-	bytesHandle.dataOffset = 0;
-	bytesHandle.handle = computeConstants.handle;
-
 	auto cbufResrc = compute_frame.pipes[0].DecodeCBufferHandle(computeCBufHandle);
-	cbufResrc->UpdateData(bytesHandle);
+	cbufResrc->UpdateData(computeConstants.GetByteSpan());
 }
 
 void Render::Draw()

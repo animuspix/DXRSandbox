@@ -5,10 +5,11 @@
 
 struct MeshLoadParams
 {
-	CPUMemory::ArrayAllocHandle<Geo::Vertex3D> outVerts;
-	uint64_t* outNumVts;
-	uint64_t* outNdces;
-	uint64_t* outNumNdces;
+	CPUMemory::ArrayAllocHandle<Geo::Vertex3D>::ArraySubsetHandle outVerts;
+	CPUMemory::MemSize* outNumVts;
+
+	CPUMemory::ArrayAllocHandle<uint64_t>::ArraySubsetHandle outNdces;
+	CPUMemory::MemSize* outNumNdces;
 	uint64_t inNdxOffset; // Because we use full-scene vertex/index buffers
 
 	CPUMemory::ArrayAllocHandle<MaterialSPD_Piecewise>* outSpectralTexAddr;

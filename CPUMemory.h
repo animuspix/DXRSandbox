@@ -25,11 +25,16 @@ class CPUMemory
 		using allocHandleMetaT0 = std::conditional_t<(initAlloc > UINT8_MAX), uint16_t, uint8_t>;
 		using allocHandleMetaT1 = std::conditional_t<(initAlloc > UINT16_MAX), uint32_t, allocHandleMetaT0>;
 		using allocHandleMetaT2 = std::conditional_t<(initAlloc > UINT32_MAX), uint64_t, allocHandleMetaT1> ;
-		using internalAllocHandleType = allocHandleMetaT2;
+		using sizeType = allocHandleMetaT2;
 
 	public:
-		using AllocHandle = internalAllocHandleType;
-		static constexpr AllocHandle emptyAllocHandle = std::numeric_limits<internalAllocHandleType>().max();
+		using MemSize = sizeType;
+		using MemOffset = sizeType;
+		using AllocHandle = sizeType;
+
+		static constexpr MemSize memSizeLimit = std::numeric_limits<sizeType>().max();
+		static constexpr AllocHandle emptyAllocHandle = memSizeLimit;
+		static constexpr MemOffset invalidMemOffset = static_cast<MemOffset>(emptyAllocHandle);
 
 	private:
 		static char* GetHandlePtr(AllocHandle handle);
@@ -37,10 +42,39 @@ class CPUMemory
 		template<typename ptrType>
 		static ptrType* GetHandlePtr(AllocHandle handle)
 		{
+			// There's probably a better way to implement this
+			// Maybe something in C++23ish?
 			return reinterpret_cast<ptrType*>(GetHandlePtr(handle));
 		}
 
 	public:
+		struct ByteSpan
+		{
+			private:
+				AllocHandle owningHandle = emptyAllocHandle;
+				MemOffset offset = 0;
+				MemSize length = 0;
+
+				ByteSpan(AllocHandle _handle, MemOffset _offset, MemSize _length) : owningHandle(_handle), offset(_offset), length(_length) {}
+			
+			public:
+				template<std::integral sizeTagType>
+				void* Bytes(sizeTagType& lengthOut)
+				{
+					lengthOut = length;
+					return GetHandlePtr(owningHandle) + offset;
+				}
+
+				bool HasDefinedElements()
+				{
+					return owningHandle == emptyAllocHandle && length != 0 && offset < length;
+				}
+
+				ByteSpan() : owningHandle(emptyAllocHandle), offset(0), length(0) {};
+
+			friend CPUMemory;
+		};
+
 		template<typename type>
 		struct SingleAllocHandle
 		{
@@ -58,6 +92,12 @@ class CPUMemory
 				return *CPUMemory::GetHandlePtr<innerType>(handle);
 			}
 
+			friend struct ByteSpan;
+			ByteSpan GetByteSpan()
+			{
+				return ByteSpan(handle, 0, sizeof(innerType));
+			}
+
 			SingleAllocHandle() { handle = emptyAllocHandle; }
 		};
 
@@ -66,39 +106,119 @@ class CPUMemory
 		{
 			using innerType = type;
 
-			uint64_t arrayLen = 0;
+			MemSize arrayLen = 0;
 			AllocHandle handle = emptyAllocHandle;
-			size_t dataOffset = 0; // For data atlassing, nested buffers, etc
 
-			ArrayAllocHandle() : arrayLen(0), handle(emptyAllocHandle), dataOffset(0) {}
-			ArrayAllocHandle(uint64_t numElts, AllocHandle _handle, size_t _dataOffset = 0) : arrayLen(numElts), handle(_handle), dataOffset(_dataOffset) {}
-
-			innerType* operator->() const
-			{
-				return CPUMemory::GetHandlePtr<innerType>(handle) + dataOffset;
-			}
-
-			innerType& operator*() const
-			{
-				return *(CPUMemory::GetHandlePtr<innerType>(handle) + dataOffset);
-			}
+			ArrayAllocHandle() : arrayLen(0), handle(emptyAllocHandle) {}
+			ArrayAllocHandle(MemSize numElts, AllocHandle _handle) : arrayLen(numElts), handle(_handle) {}
 
 			innerType& operator[](size_t elt) const
 			{
-				return (CPUMemory::GetHandlePtr<innerType>(handle) + dataOffset)[elt];
+				return CPUMemory::GetHandlePtr<innerType>(handle)[elt];
 			}
 
-			template<std::integral offsetType>
-			ArrayAllocHandle<type> operator+(offsetType offset) const
+			// For data atlassing, nested buffers, etc
+			struct ArraySubsetHandle
 			{
-				auto ret = *this;
-				ret.dataOffset = offset;
-				return ret;
+				public:
+					using ownerElementType = type;
+
+				private:
+					MemSize lengthInElements = 0;
+					MemOffset offsetInElements = 0;
+					AllocHandle owningHandle = emptyAllocHandle;
+
+				public:
+					ownerElementType& operator[](size_t elt) const
+					{
+						assert(elt < static_cast<size_t>(lengthInElements));
+						assert(owningHandle != emptyAllocHandle);
+
+						return CPUMemory::GetHandlePtr<ownerElementType>(owningHandle)[offsetInElements + elt];
+					}
+
+					void ZeroData()
+					{
+						memset(CPUMemory::GetHandlePtr<ownerElementType>(owningHandle) + offsetInElements, 0x0, lengthInElements * sizeof(ownerElementType));
+					}
+
+					void FlushData()
+					{
+						memset(CPUMemory::GetHandlePtr<ownerElementType>(owningHandle) + offsetInElements, 0xff, lengthInElements * sizeof(ownerElementType));
+					}
+
+					void CopyDataFrom(void* src)
+					{
+						assert(owningHandle != emptyAllocHandle);
+						assert(src != nullptr);
+						memcpy(CPUMemory::GetHandlePtr<ownerElementType>(owningHandle) + offsetInElements, src, lengthInElements * sizeof(ownerElementType));
+					}
+
+					void CopyDataTo(void* dst)
+					{
+						assert(owningHandle != emptyAllocHandle);
+						assert(dst != nullptr);
+						memcpy(dst, CPUMemory::GetHandlePtr<ownerElementType>(owningHandle) + offsetInElements, lengthInElements * sizeof(ownerElementType));
+					}
+
+					int CompareData(void* other)
+					{
+						assert(owningHandle != emptyAllocHandle);
+						assert(other != nullptr);
+						return memcmp(CPUMemory::GetHandlePtr<ownerElementType>(owningHandle) + offsetInElements, other, lengthInElements * sizeof(ownerElementType));
+					}
+
+					ByteSpan GetByteSpan()
+					{
+						return ByteSpan(owningHandle, offsetInElements, lengthInElements);
+					}
+
+					template<typename type>
+					void CopyDataFrom(ArrayAllocHandle<type> src)
+					{
+						assert(owningHandle != emptyAllocHandle);
+						assert(src.handle != emptyAllocHandle);
+						assert(src.arrayLen <= lengthInElements);
+
+						CopyDataFrom(GetHandlePtr(src.handle));
+					}
+
+					template<typename type>
+					void CopyDataTo(ArrayAllocHandle<type> dst)
+					{
+						assert(owningHandle != emptyAllocHandle);
+						assert(dst.handle != emptyAllocHandle);
+						assert(dst.arrayLen <= lengthInElements);
+
+						CopyDataTo(GetHandlePtr(dst.handle));
+					}
+
+				friend ArrayAllocHandle<ownerElementType>;
+			};
+
+			void SubsetHandle(ArraySubsetHandle& subset, MemSize elementOffset, MemSize elementCount) const
+			{
+				assert((elementOffset + elementCount) < arrayLen);
+
+				subset.offsetInElements = elementOffset;
+				subset.lengthInElements = elementCount;
+				subset.owningHandle = handle;
 			}
 
-			ArrayAllocHandle<uint8_t> GetBytesHandle()
+			ArraySubsetHandle operator+(MemOffset offset) const
 			{
-				return ArrayAllocHandle<uint8_t>(arrayLen * sizeof(innerType), handle, dataOffset);
+				assert(offset < arrayLen);
+				assert(handle != emptyAllocHandle);
+
+				ArraySubsetHandle subrange = {};
+				SubsetHandle(subrange, offset, arrayLen - offset);
+
+				return subrange;
+			}
+
+			ByteSpan GetByteSpan()
+			{
+				return ByteSpan(handle, 0, arrayLen);
 			}
 		};
 
@@ -146,6 +266,8 @@ class CPUMemory
 		template<typename type>
 		static void CopyData(ArrayAllocHandle<type> src, void* dst)
 		{
+			assert(dst != nullptr);
+
 			const type* ptrSrc = CPUMemory::GetHandlePtr<type>(src.handle);
 			memcpy(dst, ptrSrc, src.arrayLen * sizeof(type));
 		}
@@ -153,6 +275,9 @@ class CPUMemory
 		template<typename type>
 		static void CopyData(void* src, ArrayAllocHandle<type> dst)
 		{
+			assert(src != nullptr);
+			assert(dst.handle != emptyAllocHandle);
+			
 			type* ptrDst = CPUMemory::GetHandlePtr<type>(dst.handle);
 			memcpy(ptrDst, src, dst.arrayLen * sizeof(type));
 		}
@@ -160,6 +285,9 @@ class CPUMemory
 		template<typename type>
 		static void CopyData(SingleAllocHandle<type> src, SingleAllocHandle<type> dst)
 		{
+			assert(src.handle != emptyAllocHandle);
+			assert(dst.handle != emptyAllocHandle);
+
 			const type* ptrSrc = CPUMemory::GetHandlePtr<type>(src.handle);
 			type* ptrDst = CPUMemory::GetHandlePtr<type>(dst.handle);
 
@@ -169,6 +297,9 @@ class CPUMemory
 		template<typename type>
 		static void CopyData(SingleAllocHandle<type> src, void* dst)
 		{
+			assert(dst != nullptr);
+			assert(src.handle != emptyAllocHandle);
+
 			const type* ptrSrc = CPUMemory::GetHandlePtr<type>(src.handle);
 			memcpy(dst, ptrSrc, sizeof(type));
 		}
@@ -176,8 +307,47 @@ class CPUMemory
 		template<typename type>
 		static void CopyData(void* src, SingleAllocHandle<type> dst)
 		{
+			assert(src != nullptr);
+			assert(dst.handle != emptyAllocHandle);
+
 			type* ptrDst = CPUMemory::GetHandlePtr<type>(dst.handle);
 			memcpy(ptrDst, src, sizeof(type));
+		}
+
+		static void CopyData(ByteSpan src, void* dst)
+		{
+			assert(dst != nullptr);
+			assert(src.owningHandle != emptyAllocHandle);
+
+			memcpy(dst, GetHandlePtr(src.owningHandle) + src.offset, src.length);
+		}
+
+		template<typename type>
+		static void CopyData(ArrayAllocHandle<type> src, ArrayAllocHandle<type>::ArraySubsetHandle dst)
+		{
+			dst.CopyDataFrom(src);
+		}
+
+		template<typename type>
+		static void CopyData(ArrayAllocHandle<type>::ArraySubsetHandle src, ArrayAllocHandle<type> dst)
+		{
+			src.CopyDataTo(dst);
+		}
+
+		template<typename type>
+		static void CopyData(ByteSpan src, ArrayAllocHandle<type> dst)
+		{
+			assert(src.owningHandle != emptyAllocHandle);
+			assert(dst.handle != emptyAllocHandle);
+			assert(src.length <= dst.arrayLen * sizeof(type));
+
+			memcpy(GetHandlePtr(dst.handle), GetHandlePtr(src.owningHandle) + src.offset, src.length);
+		}
+
+		template<typename type>
+		static void CopyData(ArrayAllocHandle<type> src, ByteSpan dst)
+		{
+			CopyData(dst, src);
 		}
 
 		template<typename type>
@@ -203,6 +373,8 @@ class CPUMemory
 		template<typename type>
 		static int CompareData(ArrayAllocHandle<type> a, void* b)
 		{
+			assert(b != nullptr);
+
 			type* ptrA = CPUMemory::GetHandlePtr<type>(a.handle);
 			return memcmp(ptrA, b, a.arrayLen * sizeof(type));
 		}
@@ -210,8 +382,7 @@ class CPUMemory
 		template<typename type>
 		static int CompareData(void* a, ArrayAllocHandle<type> b)
 		{
-			type* ptrB = CPUMemory::GetHandlePtr(b.handle);
-			return memcmp(a, ptrB, b.arrayLen * sizeof(type));
+			return CompareData(b, a);
 		}
 
 		template<typename type>
@@ -220,20 +391,28 @@ class CPUMemory
 			return SingleAllocHandle<type>(AllocateRange(sizeof(type)));
 		}
 
-		template<typename arrayType, uint64_t num>
+		template<typename arrayType, MemSize num>
 		static ArrayAllocHandle<arrayType> AllocateArrayStatic()
 		{
 			ArrayAllocHandle<arrayType> arrayHandle;
-			arrayHandle.handle = AllocateRange(sizeof(arrayType) * num);
+			
+			const uint64_t allocSize = sizeof(arrayType) * num;
+			assert(allocSize < initAlloc); 
+			
+			arrayHandle.handle = AllocateRange(static_cast<MemSize>(allocSize));
 			arrayHandle.arrayLen = num;
 			return arrayHandle;
 		}
 
 		template<typename arrayType>
-		static ArrayAllocHandle<arrayType> AllocateArray(uint64_t num)
+		static ArrayAllocHandle<arrayType> AllocateArray(MemSize num)
 		{
 			ArrayAllocHandle<arrayType> arrayHandle;
-			arrayHandle.handle = AllocateRange(sizeof(arrayType) * num);
+			
+			const uint64_t allocSize = sizeof(arrayType) * num;
+			assert(allocSize < initAlloc);
+
+			arrayHandle.handle = AllocateRange(static_cast<MemSize>(allocSize));
 			arrayHandle.arrayLen = num;
 			return arrayHandle;
 		}
@@ -247,7 +426,6 @@ class CPUMemory
 		template<typename HandleType>
 		static void Free(ArrayAllocHandle<HandleType> _handle)
 		{
-			assert(_handle.dataOffset == 0); // Offset handles are pointers into another allocation and can't be freed themselves
 			Free(_handle.handle);
 		}
 
@@ -258,10 +436,7 @@ class CPUMemory
 		}
 
 	private:
-		static AllocHandle AllocateRange(uint64_t rangeBytes);
-
-		// To enable loans without exposing de-allocs (icky to use with linear allocators like this)
-		friend struct CPUMemoryLoan;
+		static AllocHandle AllocateRange(MemSize rangeBytes);
 };
 
 // Scoped memory loan, useful for functions where we want to access a lot of memory quickly without making a permanent allocation
@@ -274,7 +449,7 @@ struct CPUMemoryLoan
 
 	~CPUMemoryLoan()
 	{
-		CPUMemory::Free(mem.handle);
+		CPUMemory::Free<char>(mem.handle);
 	}
 
 	CPUMemory::ArrayAllocHandle<char> mem = { 0, CPUMemory::emptyAllocHandle };

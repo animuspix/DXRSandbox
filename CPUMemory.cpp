@@ -7,12 +7,13 @@ char* data = nullptr;
 static constexpr uint64_t scratchFootprint = CPUMemory::initAlloc / 2; // We sacrifice half our memory for scratch
 char* scratch = nullptr;
 
-char* nextAllocAddress = nullptr;
+CPUMemory::MemOffset nextAllocOffset = CPUMemory::invalidMemOffset;
 
 struct Alloc
 {
-	char* destPtr;
-	uint64_t size;
+	CPUMemory::MemOffset ptrOffset; // Look ma no pointers! This is a byte offset to the start of each alloc's owned data within our private buffer (data)
+									// Distinct from the offset within the handle buffer to the handle info (what the internal/external handles point to)
+	CPUMemory::MemSize size;
 
 	// For handle updates on memory free
 	// When pointers within the alloc buffer are freed, the pointers allocated after them are reordered,
@@ -59,13 +60,13 @@ struct AllocBuffer
 void InitAllocBuffer(AllocBuffer* allocs);
 Alloc FindHandleAlloc(AllocBuffer* allocs, CPUMemory::AllocHandle handle, CPUMemory::AllocHandle* outIndex);
 
-CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, char* destPtr, uint64_t size);
-void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handle, char** nextAllocAddress);
+CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, CPUMemory::MemOffset destPtr, CPUMemory::MemSize size);
+void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handle);
 
 extern AllocBuffer* allocs = nullptr;
 
-static uint64_t memUsed = 0;
-static uint64_t clientDataOffset = sizeof(AllocBuffer);
+static constexpr CPUMemory::MemOffset clientDataOffset = sizeof(AllocBuffer);
+static CPUMemory::MemSize memUsed = 0;
 
 #ifdef MEM_MGR_TEST
 //#define LOG_MEM_TESTS
@@ -74,10 +75,17 @@ static uint64_t clientDataOffset = sizeof(AllocBuffer);
 
 char* swapMem = nullptr;
 
+char* AddressFromOffset(CPUMemory::MemOffset offset)
+{
+	return data + offset;
+}
+
 char* CPUMemory::GetHandlePtr(AllocHandle handle)
 {
+	assert(handle < AllocBuffer::maxNumAllocs);
+
 	uint32_t ndx = 0;
-	return FindHandleAlloc(allocs, handle, &ndx).destPtr;
+	return AddressFromOffset( FindHandleAlloc(allocs, handle, &ndx).ptrOffset );
 }
 
 void CPUMemory::ZeroData(AllocHandle handle, uint64_t size)
@@ -95,7 +103,7 @@ void CPUMemory::Init()
 	data = reinterpret_cast<char*>(malloc(initAlloc));
 	allocs = reinterpret_cast<AllocBuffer*>(data);
 	scratch = data + (initAlloc - scratchFootprint);
-	nextAllocAddress = data + clientDataOffset;
+	nextAllocOffset = clientDataOffset;
 	memUsed = 0;
 
 	// Initialize book-keeping
@@ -107,19 +115,20 @@ void CPUMemory::DeInit()
 	free(data);
 }
 
-CPUMemory::AllocHandle CPUMemory::AllocateRange(uint64_t rangeBytes)
+CPUMemory::AllocHandle CPUMemory::AllocateRange(CPUMemory::MemSize rangeBytes)
 {
 	// No benefit to accounting for alignment in addresses, since we re-alloc all over the place
 	////////////////////////////////////////////////////////////////////////////////////////////
 
-	// Cache the current allocator start
-	char* ptr = nextAllocAddress;
+	// Cache the current allocator start, converted to an offset
+	// Can probably straight-up convert nextAllocOffset to an offset to save some logic...
+	CPUMemory::MemOffset offset = nextAllocOffset;// - reinterpret_cast<uint64_t>(data); // Probably UB ^_^'
 
 	// Book-keeping ^_^
-	AllocHandle handle = AddAlloc(allocs, ptr, rangeBytes);
+	AllocHandle handle = AddAlloc(allocs, offset, rangeBytes);
 
 	// Offset future allocs by footprint + initial alignment
-	nextAllocAddress += rangeBytes;
+	nextAllocOffset += rangeBytes;
 
 	// Update memory utilization tracker
 	memUsed += rangeBytes;
@@ -128,15 +137,33 @@ CPUMemory::AllocHandle CPUMemory::AllocateRange(uint64_t rangeBytes)
 }
 
 void CPUMemory::Free(AllocHandle handle)
-{
-	assert(handle < AllocBuffer::maxNumHandles);
+{	
+	bool invalidFree = false;
+	if (handle < AllocBuffer::maxNumAllocs)
+	{
+		if (allocs->handleConvertExternalInternal[handle] == CPUMemory::emptyAllocHandle)
+		{
+			invalidFree = true;
+		}
+	}
+	else
+	{
+		invalidFree = true;
+	}
+
+	assert(!invalidFree);
+
+	if (invalidFree)
+	{
+		return; // Handle either points to unallocated memory or memory that was already freed, so return early (and fail in debug mode, see assert above)
+	}
 
 	uint32_t allocNdx = 0;
 	Alloc alloc = FindHandleAlloc(allocs, handle, &allocNdx);
 
-	if (alloc.destPtr != nullptr && alloc.size != 0)
+	if (alloc.ptrOffset != CPUMemory::invalidMemOffset && alloc.size != 0)
 	{
-		RemoveAlloc(allocs, allocNdx, handle, &nextAllocAddress);
+		RemoveAlloc(allocs, allocNdx, handle);
 #ifdef MEM_MGR_TEST
 #ifdef LOG_MEM_TESTS
 		printf("Allocation freed successfully\n\n");
@@ -161,7 +188,7 @@ void InitAllocBuffer(AllocBuffer* allocs)
 	allocs->numHandles = 0;
 
 	memset(allocs->allocSet, 0xff, sizeof(allocs));
-	memset(allocs->handleConvertExternalInternal, 0x0, sizeof(AllocBuffer::handleConvertExternalInternal));
+	memset(allocs->handleConvertExternalInternal, CPUMemory::emptyAllocHandle, sizeof(AllocBuffer::handleConvertExternalInternal));
 }
 
 Alloc FindHandleAlloc(AllocBuffer* allocs, CPUMemory::AllocHandle handle, CPUMemory::AllocHandle* outIndex)
@@ -172,7 +199,7 @@ Alloc FindHandleAlloc(AllocBuffer* allocs, CPUMemory::AllocHandle handle, CPUMem
 	if (convertedHandle > allocs->numHandles || convertedHandle == CPUMemory::emptyAllocHandle)
 	{
 		Alloc alloc;
-		alloc.destPtr = nullptr;
+		alloc.ptrOffset = CPUMemory::invalidMemOffset;
 		alloc.size = 0;
 		return alloc;
 	}
@@ -183,11 +210,11 @@ Alloc FindHandleAlloc(AllocBuffer* allocs, CPUMemory::AllocHandle handle, CPUMem
 	}
 }
 
-CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, char* destPtr, uint64_t size)
+CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, CPUMemory::MemOffset ptrOffset, CPUMemory::MemSize size)
 {
 	assert(allocs->numAllocs < allocs->maxNumAllocs);
 
-	Alloc alloc = { destPtr, size };
+	Alloc alloc = { ptrOffset, size };
 	allocs->allocSet[allocs->numAllocs] = alloc;
 
 	CPUMemory::AllocHandle handle = allocs->numHandles;
@@ -206,7 +233,7 @@ CPUMemory::AllocHandle AddAlloc(AllocBuffer* allocs, char* destPtr, uint64_t siz
 	return handle;
 }
 
-void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handle, char** nextAllocAddress)
+void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handle)
 {
 	Alloc ndxedAlloc = allocs->allocSet[ndx];
 	allocs->handleConvertExternalInternal[handle] = CPUMemory::emptyAllocHandle;
@@ -226,7 +253,7 @@ void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handl
 
 		// Copy data into scratch
 		const Alloc nextAlloc = allocs->allocSet[ndx + 1];
-		memcpy(scratch, nextAlloc.destPtr, bytesShifting);
+		memcpy(scratch, AddressFromOffset(nextAlloc.ptrOffset), bytesShifting);
 
 		// Memcpy & pointer updates
 		for (uint32_t i = (ndx + 1); i < allocs->numAllocs; i++)
@@ -235,11 +262,11 @@ void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handl
 			const Alloc prevAlloc = allocs->allocSet[i - 1];
 
 			assert(currAlloc.size < scratchFootprint);
-			allocs->allocSet[i].destPtr -= ndxedAlloc.size; // More efficient than pointer reassignment
+			allocs->allocSet[i].ptrOffset -= ndxedAlloc.size; // More efficient than pointer reassignment
 		}
 
 		// Copy data back from scratch into freed address
-		memcpy(ndxedAlloc.destPtr, scratch, bytesShifting);
+		memcpy(AddressFromOffset(ndxedAlloc.ptrOffset), scratch, bytesShifting);
 
 		// Bubble-out the null alloc
 		for (uint32_t i = ndx; i < (allocs->numAllocs - 1); i++)
@@ -255,15 +282,15 @@ void RemoveAlloc(AllocBuffer* allocs, uint32_t ndx, CPUMemory::AllocHandle handl
 
 		// Update the next allocation address
 		memUsed -= ndxedAlloc.size;
-		*nextAllocAddress = data + clientDataOffset + memUsed;
+		nextAllocOffset = clientDataOffset + memUsed;
 
 #ifdef CORRUPTION_VERIFICATION
-		assert(memcmp(*nextAllocAddress - bytesShifting, scratch, bytesShifting) == 0);
+		assert(memcmp(*nextAllocOffset - bytesShifting, scratch, bytesShifting) == 0);
 #endif
 	}
 	else
 	{
-		*nextAllocAddress = ndxedAlloc.destPtr;
+		nextAllocOffset = ndxedAlloc.ptrOffset;
 		memUsed -= ndxedAlloc.size;
 	}
 

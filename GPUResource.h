@@ -45,9 +45,9 @@ struct GPUResource
 		{
 			stride = sizeof(bufferType);
 			dimensions[0] = 1;
-			srcData.handle = _srcData.handle;
-			srcData.arrayLen = sizeof(bufferType);
-			srcData.dataOffset = 0;
+
+			srcData = _srcData.GetByteSpan();
+
 			this->resrcName = name;
 		}
 
@@ -57,24 +57,23 @@ struct GPUResource
 			stride = sizeof(v);
 			dimensions[0] = numElts;
 			
-			srcData.handle = _srcData.handle;
-			srcData.arrayLen = _srcData.arrayLen * sizeof(v);
-			srcData.dataOffset = _srcData.dataOffset;
+			srcData = _srcData.GetByteSpan();
 			
 			this->resrcName = name;
 		}
 
-		void initForStructBuffer(uint32_t numElts, uint32_t eltStride, LPCWSTR name, CPUMemory::ArrayAllocHandle<uint8_t> _srcData)
+		void initForStructBuffer(uint32_t numElts, uint32_t eltStride, LPCWSTR name, CPUMemory::ByteSpan _srcData)
 		{
 			stride = eltStride;
 			dimensions[0] = numElts;
 			srcData = _srcData;
+
 			this->resrcName = name;
 		}
 
 		uint32_t stride;
 		uint32_t dimensions[numDimensions]; // Resource width/heights in number of elements, not bytes
-		CPUMemory::ArrayAllocHandle<uint8_t> srcData = {}; // Imported resource data, either procedural or loaded from disk; nullptr (undefined/unused) by default
+		CPUMemory::ByteSpan srcData = {}; // Imported resource data, either procedural or loaded from disk; zeroed out (
 	};
 	struct resrc_desc_texture_fmt : public resrc_descs_shared
 	{
@@ -83,13 +82,13 @@ struct GPUResource
 		uint32_t stride; // No reason I can't precompute this here and make it constant for regular resources/textures, its just a lot of code
 		uint32_t dimensions[numDimensions]; // Resource width/heights in number of elements, not bytes
 		RasterSettings::MSAASettings msaa;
-		CPUMemory::ArrayAllocHandle<uint8_t> srcData = {}; // Imported resource data, either procedural or loaded from disk; nullptr (undefined/unused) by default
+		CPUMemory::ByteSpan srcData = {}; // Imported resource data, either procedural or loaded from disk
 	};
 	struct resrc_desc_vbuffer_fmt : public resrc_descs_shared
 	{
 		uint32_t stride;
 		uint32_t dimensions[numDimensions];
-		CPUMemory::ArrayAllocHandle<uint8_t> srcData = {}; // Imported resource data, either procedural or loaded from disk; nullptr (undefined/unused) by default
+		CPUMemory::ByteSpan srcData = {}; // Imported resource data, either procedural or loaded from disk
 		StandardResrcFmts eltFmts[XPlatConstants::maxVBufferStride / XPlatConstants::eltSizeInBytes];
 		VertexEltSemantics eltSemantics[XPlatConstants::maxVBufferStride / XPlatConstants::eltSizeInBytes];
 		uint32_t numEltsPerVert;
@@ -97,7 +96,7 @@ struct GPUResource
 		template<typename v>
 		void init(StandardResrcFmts _eltFmts[sizeof(v) / XPlatConstants::eltSizeInBytes],
 				  VertexEltSemantics _eltSemantics[sizeof(v) / XPlatConstants::eltSizeInBytes],
-				  CPUMemory::ArrayAllocHandle<uint8_t> _srcData,
+				  CPUMemory::ByteSpan _srcData,
 				  uint32_t numVerts,
 				  LPCWSTR name) // Semantic formats are expected to increase from the first to the last vertex element (so no POSITION4 then POSITION0 or w/e)
 		{
@@ -115,7 +114,7 @@ struct GPUResource
 		StandardIBufferFmts fmt;
 		uint32_t stride;
 		uint32_t dimensions[numDimensions];
-		CPUMemory::ArrayAllocHandle<uint8_t> srcData = {}; // Imported resource data, either procedural or loaded from disk; nullptr (undefined/unused) by default
+		CPUMemory::ByteSpan srcData = {}; // Imported resource data, either procedural or loaded from disk
 	};
 	struct resrc_desc_accelStruct_fmt : public resrc_descs_shared
 	{
@@ -346,7 +345,7 @@ struct GPUResource
 		}
 	}
 
-	void UpdateData(CPUMemory::ArrayAllocHandle<uint8_t> data)
+	void UpdateData(CPUMemory::ByteSpan data)
 	{
 		DXWrapper::UpdateResrcData(resrc, data);
 	}

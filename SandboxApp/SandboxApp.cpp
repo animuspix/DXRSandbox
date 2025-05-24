@@ -113,7 +113,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         // during this call
         // MAY be worthwhile having a specialist upload class - depends how those uploads are instrumented, lots of
         // complicated thoughts there
-        frameConstants->timeSeconds = std::chrono::steady_clock::now().time_since_epoch().count() * 1e-9;
+        frameConstants->timeSeconds = static_cast<float>(std::chrono::steady_clock::now().time_since_epoch().count() * 1e-9);
         rndr->UpdateFrameConstants(frameConstants);
 
         // Draw current frame

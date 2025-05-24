@@ -112,7 +112,7 @@ class DXWrapper
 		static void InsertTransition(ResourceViews beforeVariant, ResourceViews afterVariant, uint64_t resrcNdx, uint8_t pipelineID);
 		static void NameResourceInternal(uint64_t resrcID, LPCWSTR name);
 
-		static void UpdateCBufferData(DataHandle<D3D_CBUFFER> handle, CPUMemory::ArrayAllocHandle<uint8_t> data);
+		static void UpdateCBufferData(DataHandle<D3D_CBUFFER> handle, CPUMemory::ByteSpan data);
 
 	public:
 		template<D3D_OBJ_FMT handleFmt>
@@ -122,7 +122,7 @@ class DXWrapper
 		}
 
 		template<D3D_OBJ_FMT fmt>
-		static void UpdateResrcData(DataHandle<fmt> handle, CPUMemory::ArrayAllocHandle<uint8_t> data)
+		static void UpdateResrcData(DataHandle<fmt> handle, CPUMemory::ByteSpan data)
 		{
 			static_assert(handle.format == D3D_CBUFFER || handle.format == D3D_IBUFFER || handle.format == D3D_IBUFFER || handle.format == D3D_STRUCTBUFFER || handle.format == D3D_TEXTURE, "UpdateResrcData can only be used on resource objects");
 
@@ -182,12 +182,12 @@ class DXWrapper
 		// View-dependant accesses are completely relegated to descriptors/bindings
 		// Non-null [srcData] for cbuffers makes no difference since they go on the upload heap anyway
 		// Non-null [srcData] for other resources causes a temporary allocation on the upload heap, followed by a copy to the GPU heap and deallocating the upload entry
-		static DataHandle<D3D_CBUFFER> GenerateConstantBuffer(uint32_t footprint, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID);
-		static DataHandle<D3D_STRUCTBUFFER> GenerateStructuredBuffer(uint32_t footprint, uint32_t stride, uint32_t numElements, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID);
-		static DataHandle<D3D_TEXTURE> GenerateStandardTexture(uint32_t width, uint32_t height, StandardResrcFmts fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, TextureViews textureVariant, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID);
-		static DataHandle<D3D_TEXTURE> GenerateDepthStencilTexture(uint32_t width, uint32_t height, StandardDepthStencilFormats fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID);
-		static DataHandle<D3D_IBUFFER> GenerateIndexBuffer(uint32_t footprint, StandardIBufferFmts fmt, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID);
-		static DataHandle<D3D_VBUFFER> GenerateVertexBuffer(uint32_t footprint, uint32_t stride, uint32_t numElts, StandardResrcFmts* eltFmts, GPUResrcPermSetGeneric accessSettings, CPUMemory::ArrayAllocHandle<uint8_t> srcData, uint32_t pipelineID);
+		static DataHandle<D3D_CBUFFER> GenerateConstantBuffer(uint32_t footprint, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID);
+		static DataHandle<D3D_STRUCTBUFFER> GenerateStructuredBuffer(uint32_t footprint, uint32_t stride, uint32_t numElements, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID);
+		static DataHandle<D3D_TEXTURE> GenerateStandardTexture(uint32_t width, uint32_t height, StandardResrcFmts fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, TextureViews textureVariant, CPUMemory::ByteSpan srcData, uint32_t pipelineID);
+		static DataHandle<D3D_TEXTURE> GenerateDepthStencilTexture(uint32_t width, uint32_t height, StandardDepthStencilFormats fmt, RasterSettings::MSAASettings msaa, GPUResrcPermSetTextures accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID);
+		static DataHandle<D3D_IBUFFER> GenerateIndexBuffer(uint32_t footprint, StandardIBufferFmts fmt, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID);
+		static DataHandle<D3D_VBUFFER> GenerateVertexBuffer(uint32_t footprint, uint32_t stride, uint32_t numElts, StandardResrcFmts* eltFmts, GPUResrcPermSetGeneric accessSettings, CPUMemory::ByteSpan srcData, uint32_t pipelineID);
 
 		// Name the given resource, not much overhead, useful for debugging
 		template<D3D_OBJ_FMT objHandleFmt> requires d3dResrcObj<objHandleFmt>

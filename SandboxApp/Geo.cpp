@@ -28,23 +28,23 @@ void Geo::Init(uint32_t numScenes, Scene* scenes)
     models = CPUMemory::AllocateArray<Vertex3D>(maxVerts);
     ndces = CPUMemory::AllocateArray<uint64_t>(maxVerts);
 
-    uint64_t vtsWriteOffset = 0;
-    uint64_t ndcesWriteOffset = 0;
+    CPUMemory::MemOffset vtsWriteOffset = 0;
+    CPUMemory::MemOffset ndcesWriteOffset = 0;
     for (uint32_t i = 0; i < numScenes; i++)
     {
         sceneMaterials[i] = CPUMemory::AllocateArray<Material>(scenes[i].numModels);
 
-        uint64_t numSceneVts = 0;
-        uint64_t numSceneNdces = 0;
+        CPUMemory::MemSize numSceneVts = 0;
+        CPUMemory::MemSize numSceneNdces = 0;
         for (uint32_t j = 0; j < scenes[i].numModels; j++)
         {
-            uint64_t numModelVts = 0;
-            uint64_t numModelNdces = 0;
+            CPUMemory::MemSize numModelVts = 0;
+            CPUMemory::MemSize numModelNdces = 0;
 
             MeshLoadParams params = {};
             params.outVerts = models + vtsWriteOffset;
             params.outNumVts = &numModelVts;
-            params.outNdces = &ndces[0] + ndcesWriteOffset;
+            params.outNdces = ndces + ndcesWriteOffset;
             params.outNumNdces = &numModelNdces;
             params.inNdxOffset = numModelNdces;
 
@@ -83,7 +83,7 @@ void Geo::Init(uint32_t numScenes, Scene* scenes)
         // VBuffer setup
         StandardResrcFmts fmts[3] = { StandardResrcFmts::FP32_4, StandardResrcFmts::FP32_4, StandardResrcFmts::FP32_4 }; // Considering whether to compress these - *probably* sticking with FP32_4
         VertexEltSemantics semantics[3] = { VertexEltSemantics::POSITION, VertexEltSemantics::TEXCOORD, VertexEltSemantics::NORMAL };
-        sceneBuffers[i].vbufferDesc.init<Vertex3D>(fmts, semantics, (models + vtsWriteOffset).GetBytesHandle(), static_cast<uint32_t>(numSceneVts), label);
+        sceneBuffers[i].vbufferDesc.init<Vertex3D>(fmts, semantics, (models + vtsWriteOffset).GetByteSpan(), static_cast<uint32_t>(numSceneVts), label);
 
         // IBuffer setup
         sceneBuffers[i].ibufferDesc.fmt = StandardIBufferFmts::U32;
@@ -91,7 +91,7 @@ void Geo::Init(uint32_t numScenes, Scene* scenes)
         sceneBuffers[i].ibufferDesc.dimensions[0] = static_cast<uint32_t>(numSceneNdces);
 
         ndces.arrayLen = sceneBuffers[i].ibufferDesc.dimensions[0]; // Appropriately scale declared index data length (length held by the memory manager is still size * maxVerts)
-        sceneBuffers[i].ibufferDesc.srcData = (ndces + ndcesWriteOffset).GetBytesHandle();
+        sceneBuffers[i].ibufferDesc.srcData = (ndces + ndcesWriteOffset).GetByteSpan();
 
         // Walk through CPU-side model/index buffers
         vtsWriteOffset += numSceneVts;
@@ -129,7 +129,7 @@ void Geo::Init(uint32_t numScenes, Scene* scenes)
     StandardResrcFmts viewVtFmts[2] = { StandardResrcFmts::FP32_4, StandardResrcFmts::FP32_4 };
     VertexEltSemantics semantics[2] = { VertexEltSemantics::POSITION, VertexEltSemantics::TEXCOORD };
 
-    viewGeo.vbufferDesc.init<Vertex2D>(viewVtFmts, semantics, viewVts.GetBytesHandle(), 4, L"viewGeoVertices");
+    viewGeo.vbufferDesc.init<Vertex2D>(viewVtFmts, semantics, viewVts.GetByteSpan(), 4, L"viewGeoVertices");
 
     viewNdces = CPUMemory::AllocateArray<uint16_t>(6);
 
@@ -143,7 +143,7 @@ void Geo::Init(uint32_t numScenes, Scene* scenes)
 
     viewGeo.ibufferDesc.fmt = StandardIBufferFmts::U16;
     viewGeo.ibufferDesc.stride = sizeof(uint16_t);
-    viewGeo.ibufferDesc.srcData = viewNdces.GetBytesHandle();
+    viewGeo.ibufferDesc.srcData = viewNdces.GetByteSpan();
     viewGeo.ibufferDesc.dimensions[0] = 6;
 
     viewGeo.ibufferDesc.resrcName = L"viewGeoNdces";
