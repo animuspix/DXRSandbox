@@ -101,6 +101,32 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
         centreMortonPacked |= bit << k;
     }
 
+    // 10 bits and three dimensions means 30 bits = ~1GB lookup
+    // Not horrible! + dense sorting from the start is seemingly not the easiest issue to solve
+    // Alternative? Create the 1GB buffer as a holding space for generated Morton data, and have another shader stage densify it
+    // The follow-up stage subdivides the holding space using one thread/code (or per=tri, one code per tri, same thing), and sets the
+    // range to densify using the min/morton codes generated earlier (computable with InterlockedMin/InterlockedMax)
+    //
+    // Problem! The codes are just a vehicle for sorting triangles
+    // So that 30-bit 1GB buffer is actually 4GB ^_^'''
+    // The faux hash table approach (write the hashes/codes out directly using their values, tag them, read them back) is possibly not ideal then?
+    // We could look into some kind of dense, lossy hash storage
+    // That seems tricky though, risky and a lot of unexplored complexity
+    //
+    // I think my original idea was to tag the triangles with their codes and sort in a post-pass
+    // a bit wasteful, but maybe not terrible, especially since you need the context of the full code set to do any kind of actually-useful
+    // dense sorting
+    // (sure you could put an octree on the huge 4GB sparse buffer, but you'd have a lot of empty cells)
+    //
+    // Might go ahead with that
+    // Sorting algorithm is likely going to be some kind of multi-pass bucket sort
+    // The ideas that come to me intuitively have the issue of sorting not happening across buckets, so likely more reading needed
+    // (or the buckets need to move left/right progressively...? idk)
+    //
+    // But yuh, I think tag triangles with their codes then multi-pass sort the triangles, instead of trying to do it all in the one shader
+    // We can leave this as the AS shader and create another couple for the code generation & sorting
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
     // Early return; just write out morton codes (to tribuffer[index].xyz.x) and quit, consider sorting etc in another pass
     // (single-pass sort doesn't seem to really be working + is undebuggable)
     triBuffer[0].xyz.x = centreMortonPacked;
