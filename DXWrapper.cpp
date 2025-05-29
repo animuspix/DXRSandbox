@@ -679,28 +679,57 @@ DXGI_FORMAT DecodeSandboxIBufferFormats(StandardIBufferFmts fmt)
 // ("code for defining a version 1.1 root signature")
 DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindList bindList, bool mayUseGraphics, uint32_t pipelineID)
 {
+	// Prepare descriptor handles/pointers
+	const uint64_t descriptorHandleIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	const uint32_t descriptorHeapPtrListStart = (pipelineID * XPlatConstants::maxResourcesPerPipeline);
+	uint32_t descriptorHeapPtrsFront = descriptorHeapPtrListStart;
+
+	uint32_t numResourcesBinding = 0;
+	if (bindList.cbufferEnabled)
+	{
+		numResourcesBinding++;
+	}
+
+	const uint32_t numSRVs = bindList.numReadOnlyTextures + (bindList.tlasEnabled ? 1 : 0);
+	if (numSRVs > 0)
+	{
+		if (bindList.tlasEnabled)
+		{
+			numResourcesBinding++;
+		}
+
+		numResourcesBinding += bindList.numReadOnlyTextures;
+	}
+
+	const uint32_t numUAVs = bindList.numStructbuffers + bindList.numRWTextures;
+	if (numUAVs > 0)
+	{
+		numResourcesBinding += bindList.numStructbuffers;
+		numResourcesBinding += bindList.numRWTextures;
+	}
+
+	// Iterate handles before generating descriptors/views
+	for (uint64_t i = 1; i < numResourcesBinding; i++) 
+	{
+		cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart + i].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart].ptr + (i * descriptorHandleIncrement);
+	}
+
 	// Generate descriptors
 	///////////////////////
 
 	// Generate cbuffer descriptors
-	const uint64_t descriptorHandleIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	const uint32_t descriptorHeapPtrListStart = (pipelineID * XPlatConstants::maxResourcesPerPipeline);
-	uint32_t descriptorHeapPtrsFront = descriptorHeapPtrListStart;
+
 	if (bindList.cbufferEnabled)
 	{
 		// Generate descriptor for the current cbuffer (just one cbuffer/pipeline)
 		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
 		cbvDesc.BufferLocation = GetGPUAddress(bindList.cbuffer);
 		cbvDesc.SizeInBytes = GetCBufferStride(bindList.cbuffer);
-		device->CreateConstantBufferView(&cbvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart]);
-
-		// Prepare descriptor handle for the next resource (if possible)
-		cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart + 1].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart].ptr + descriptorHandleIncrement;
+		device->CreateConstantBufferView(&cbvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
 		descriptorHeapPtrsFront++;
 	}
 
 	// Generate SRV descriptors
-	const uint32_t numSRVs = bindList.numReadOnlyTextures + (bindList.tlasEnabled ? 1 : 0);
 	if (numSRVs > 0)
 	{
 		// Generate descriptors for acceleration structure sub-resources
@@ -715,9 +744,6 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 			srvDesc.RaytracingAccelerationStructure.Location = GetGPUAddress<D3D_ACCELSTRUCT_TLAS>(bindList.topLevelAS);
 
 			device->CreateShaderResourceView(resources[bindList.topLevelAS.index].resrc.Get(), &srvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
-
-			// More repeated code here, good opportunity for a helper function
-			cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront + 1].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront].ptr + descriptorHandleIncrement;
 			descriptorHeapPtrsFront++;
 		}
 
@@ -733,14 +759,11 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 			srvDesc.Texture2D.PlaneSlice = 0;
 			srvDesc.Texture2D.ResourceMinLODClamp = 0;
 			device->CreateShaderResourceView(resources[bindList.readOnlyTextures[i].index].resrc.Get(), &srvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
-
-			cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront + 1].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront].ptr + descriptorHandleIncrement;
 			descriptorHeapPtrsFront++;
 		}
 	}
 
 	// Generate UAV descriptors
-	const uint32_t numUAVs = bindList.numStructbuffers + bindList.numRWTextures;
 	if (numUAVs > 0)
 	{
 		// Generate descriptors for structured buffers
@@ -756,8 +779,6 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 			uavDesc.Buffer.CounterOffsetInBytes = 0; // For now - make adjustable if/when we ever add support for counter resources
 
 			device->CreateUnorderedAccessView(resources[bindList.structbuffers[i].index].resrc.Get(), /* No support for append/consume buffers in DXRSandbox atm */ nullptr, &uavDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
-
-			cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront + 1].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront].ptr + descriptorHandleIncrement;
 			descriptorHeapPtrsFront++;
 		}
 
@@ -770,8 +791,6 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 			uavDesc.Texture2D.MipSlice = 0;
 			uavDesc.Texture2D.PlaneSlice = 0;
 			device->CreateUnorderedAccessView(resources[bindList.rwTextures[i].index].resrc.Get(), nullptr, &uavDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
-
-			cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront + 1].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront].ptr + descriptorHandleIncrement;
 			descriptorHeapPtrsFront++;
 		}
 	}
@@ -1731,7 +1750,8 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 	else if (!cbuffer)
 	{
 		// Create directly on the gpu-only heap
-		device->CreatePlacedResource(resourceHeaps[GPU_ONLY_HEAP].Get(), heapOffsets[GPU_ONLY_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&resources[resrcOffset].resrc));
+		const HRESULT success = device->CreatePlacedResource(resourceHeaps[GPU_ONLY_HEAP].Get(), heapOffsets[GPU_ONLY_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&resources[resrcOffset].resrc));
+		assert(SUCCEEDED(success));
 		heapOffsets[GPU_ONLY_HEAP] += AlignResrcFootprint(resrcFootprint, desc.Alignment);
 	}
 }
@@ -2338,7 +2358,8 @@ void DXWrapper::ResetCmdList(DataHandle<D3D_CMD_LIST> cmds)
 
 void GPUSync()
 {
-	gfxQueue->Signal(syncGPU.Get(), 1);
+	HRESULT success = gfxQueue->Signal(syncGPU.Get(), 1);
+	assert(SUCCEEDED(success));
 
 	// We love busy spinners ^_^
 	// Double-buffered work submission, eventually...
@@ -2347,7 +2368,8 @@ void GPUSync()
 		/* Could do useful work here maybe */
 	}
 
-	syncGPU->Signal(0); // Reset fence value after syncs (shitty single-buffer sync for now)
+	success = syncGPU->Signal(0); // Reset fence value after syncs (shitty single-buffer sync for now)
+	assert(SUCCEEDED(success));
 }
 
 static uint32_t numPipesIssued = 0;
@@ -2374,12 +2396,14 @@ void DXWrapper::IssueWork(DataHandle<D3D_CMD_LIST> work, bool issueSynchronous, 
 	}
 
 	// Submit any pending background commands + transfer the given work-block to the gpu, then close/reset the background command-list
-	bgCmdList->Close();
+	HRESULT success = bgCmdList->Close();
+	assert(SUCCEEDED(success));
 
 	ID3D12CommandList* cmds[2] = { bgCmdList.Get(), cmdLists[work.index].Get() };
 	gfxQueue->ExecuteCommandLists(2, cmds);
 
-	bgCmdList->Reset(bgCmdAlloc.Get(), nullptr);
+	success = bgCmdList->Reset(bgCmdAlloc.Get(), nullptr);
+	assert(SUCCEEDED(success));
 
 	numPipesIssued++;
 }

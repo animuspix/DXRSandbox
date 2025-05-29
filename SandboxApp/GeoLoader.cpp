@@ -300,8 +300,8 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 		{
 			params.outVerts[i / vertStride].pos = float4(verts[i], verts[i + 1], verts[i + 2], 0.0f);
 
-#ifdef _DEBUG
-			sprintf_s(verticesPrintable, "file source vertex %u = (%.f, %.f, %.f)\n", i / vertStride, verts[i], verts[i + 1], verts[i + 2]);
+#ifdef _DEBUG			
+			sprintf_s(verticesPrintable, "file source vertex %u = (%.5f, %.5f, %.5f)\n", i / vertStride, verts[i], verts[i + 1], verts[i + 2]);
 			OutputDebugStringA(verticesPrintable);
 #endif
 

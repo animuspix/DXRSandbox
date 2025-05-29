@@ -67,7 +67,7 @@ class CPUMemory
 
 				bool HasDefinedElements()
 				{
-					return owningHandle == emptyAllocHandle && length != 0 && offset < length;
+					return owningHandle != emptyAllocHandle && length != 0 && offset < length;
 				}
 
 				ByteSpan() : owningHandle(emptyAllocHandle), offset(0), length(0) {};
@@ -198,7 +198,7 @@ class CPUMemory
 
 			void SubsetHandle(ArraySubsetHandle& subset, MemSize elementOffset, MemSize elementCount) const
 			{
-				assert((elementOffset + elementCount) < arrayLen);
+				assert((elementOffset + elementCount) <= arrayLen);
 
 				subset.offsetInElements = elementOffset;
 				subset.lengthInElements = elementCount;
