@@ -101,6 +101,11 @@ void main( uint3 GTid : SV_GroupThreadID, uint groupIndex : SV_GroupIndex )
         centreMortonPacked |= bit << k;
     }
 
+    // Early return; just write out morton codes (to tribuffer[index].xyz.x) and quit, consider sorting etc in another pass
+    // (single-pass sort doesn't seem to really be working + is undebuggable)
+    triBuffer[0].xyz.x = centreMortonPacked;
+    return;
+
     // Hijack the first index in the first tri to find the largest Morton code
     // (once we know that we can sort into Morton order by renormalizing against the tri count, which is all we need for
     // the LBVH implementation & binary-search traversal - the actual numbers are cool but unimportant (afaik))

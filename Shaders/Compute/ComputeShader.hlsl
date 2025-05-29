@@ -219,7 +219,8 @@ void main( uint3 DTid : SV_DispatchThreadID )
     float4 lensSettings = computeCBuffer.screenAndLensOptions.lensSettings;
     float4 ray = RaySetup(DTid.xy, lensSettings.x, float2(screenWidth, screenHeight), lensSettings.w, prngChannel, spectralSample);    
 
-    //texOut[DTid.xy] = float4(ray.xyz, 1.0f);
+    texOut[DTid.xy] = float4(ray.xyz, 1.0f);
+    return;
 
     // Verifying PRNG
     //texOut[DTid.xy] = float4(rand3d(prngChannel), 1.0f);

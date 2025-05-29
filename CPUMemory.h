@@ -170,7 +170,7 @@ class CPUMemory
 
 					ByteSpan GetByteSpan()
 					{
-						return ByteSpan(owningHandle, offsetInElements, lengthInElements);
+						return ByteSpan(owningHandle, offsetInElements, lengthInElements * sizeof(ownerElementType));
 					}
 
 					template<typename type>
@@ -218,7 +218,7 @@ class CPUMemory
 
 			ByteSpan GetByteSpan()
 			{
-				return ByteSpan(handle, 0, arrayLen);
+				return ByteSpan(handle, 0, arrayLen * sizeof(innerType));
 			}
 		};
 
