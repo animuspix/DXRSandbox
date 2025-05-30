@@ -29,6 +29,23 @@ struct IndexedTriangle
 	uint4 xyz; // Triangle indices, with padding
 };
 
+struct MortonHashPair
+{
+	uint triIndex;
+	uint richMortonKey; // High-precision morton key, 10 bits/axis
+};
+
+#define MORTON_BUCKET_ENTRY_COUNT 16
+
+struct MortonHashBucket
+{
+	MortonHashPair entries[MORTON_BUCKET_ENTRY_COUNT];
+	uint entryCount;
+};
+
+#define MORTON_HASHMAP_SPATIAL_RES 8
+#define MORTON_HASHMAP_BUCKET_COUNT (1 << (MORTON_HASHMAP_SPATIAL_RES * 3))
+
 // For convenience, when using fake bools from shader code
 #ifndef TRUE
 #define TRUE 1

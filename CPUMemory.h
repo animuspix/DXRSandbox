@@ -75,6 +75,11 @@ class CPUMemory
 			friend CPUMemory;
 		};
 
+		static ByteSpan EmptyByteSpan()
+		{
+			return ByteSpan(emptyAllocHandle, 0, 0);
+		}
+
 		template<typename type>
 		struct SingleAllocHandle
 		{

@@ -32,15 +32,21 @@ RWStructuredBuffer<Vertex3D> structuredVBuffer : register(u0);
 	RWStructuredBuffer<MaterialSPD_Piecewise> spectralAtlas : register(u2);
 #endif
 
+#ifdef SPATIAL_HASH_PASS
+	RWStructuredBuffer<IndexedTriangle> triBuffer : register(u1); 
+	RWStructuredBuffer<MortonHashBucket> mortonHashmap : register(u2);
+#else
 #ifdef AS_RESOLVE_PASS
 	RWStructuredBuffer<IndexedTriangle> triBuffer : register(u1); // Indexed by grid acceleration structure
 	RWStructuredBuffer<ComputeAS_Node> bvhAS : register(u2); // Read by shading passes, written by AS resolve
 	RWStructuredBuffer<GPU_PRNG_Channel> prngPathStreams : register(u3);
+	RWStructuredBuffer<MortonHashBucket> mortonHashmap : register(u4);
 #else
 #ifdef SHADING_PASS
 	RWStructuredBuffer<IndexedTriangle> triBuffer : register(u3); // Indexed by grid acceleration structure
 	RWStructuredBuffer<ComputeAS_Node> bvhAS : register(u4); // Read by shading passes, written by AS resolve
 	RWStructuredBuffer<GPU_PRNG_Channel> prngPathStreams : register(u5);
+#endif
 #endif
 #endif
 

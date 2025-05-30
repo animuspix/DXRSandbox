@@ -173,11 +173,11 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	// Hybrid raytracing -> vbuffer/ibuffer used to construct hardware AS, we raster the originals to make a primary-ray mask, then we trace bounce rays out of the mask against the hardware AS
 	// Hardware raytracing -> vbuffer/ibuffer used to construct hardware AS; we path-trace the hardware AS for all bounces
 
-	// First compute stage (AS generation)
+	// First compute stage (spatial hashing)
 	//////////////////////////////////////
 
 	// Initialize pipeline
-	compute_frame.pipes[0].init(false);
+	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].init(false);
 
 	// Resource registration
 	GPUResource<ResourceViews::CBUFFER>::resrc_desc computeCBufDesc;
@@ -201,7 +201,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	}
 
 	computeCBufDesc.initForCBuffer<ComputeTypes::ComputeConstants>(L"computeConstants", computeConstants);
-	computeCBufHandle = compute_frame.pipes[0].RegisterCBuffer(computeCBufDesc, GENERIC_RESRC_ACCESS_DIRECT_READS);
+	computeCBufHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterCBuffer(computeCBufDesc, GENERIC_RESRC_ACCESS_DIRECT_READS);
 
 	// Vbuffer/Ibuffer
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredVbufferDesc;
@@ -209,7 +209,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	structuredVbufferDesc.initForStructBuffer(sceneGeo.vbufferDesc.dimensions[0], sceneGeo.vbufferDesc.stride, L"structuredVbuffer", sceneGeo.vbufferDesc.srcData);
 
 	constexpr int resrcRW_Permissions = GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES;
-	auto structuredVbuffer = compute_frame.pipes[0].RegisterStructBuffer(structuredVbufferDesc, resrcRW_Permissions);
+	auto structuredVbuffer = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterStructBuffer(structuredVbufferDesc, resrcRW_Permissions);
 
 	const uint32_t numTris = sceneGeo.ibufferDesc.dimensions[0] / 3;
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredTribufferDesc;
@@ -241,7 +241,25 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	}
 
 	structuredTribufferDesc.initForStructBuffer(numTris, sizeof(IndexedTriangle), L"structuredTribuffer", tribufferMemory.GetByteSpan());
-	auto tribufferHandle = compute_frame.pipes[0].RegisterStructBuffer(structuredTribufferDesc, resrcRW_Permissions);
+	auto tribufferHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterStructBuffer(structuredTribufferDesc, resrcRW_Permissions);
+
+	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc mortonHashmapDesc;
+	mortonHashmapDesc.initForStructBuffer(MORTON_HASHMAP_BUCKET_COUNT, sizeof(MortonHashBucket), L"mortonHashmap", CPUMemory::EmptyByteSpan());
+	auto mortonHashmapHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterStructBuffer(mortonHashmapDesc, resrcRW_Permissions);
+
+	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].ResolveRootSignature();
+
+	auto csMorton_ResolutionHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterComputeShader("ComputeSpatialHashing.cso", std::max(numTris / 64u, 1u), 1u, 1u);
+	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].AppendComputeExec(csMorton_ResolutionHandle);
+	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].BakeCmdList();
+
+	// Second compute stage; AS generation
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].init(false);
+
+	// Bind resources shared with spatial hashing
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterCBuffer(computeCBufHandle);
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(structuredVbuffer);
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(tribufferHandle);
 
 	// AS write-out (16M cells, at most two children each)
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc as_Desc;
@@ -293,7 +311,7 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	CPUMemory::ZeroData(bvhAS);
 
 	as_Desc.initForStructBuffer<ComputeAS_Node>(numCells, L"octreeAS", bvhAS);
-	auto customAS = compute_frame.pipes[0].RegisterStructBuffer(as_Desc, resrcRW_Permissions);
+	auto customAS = compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(as_Desc, resrcRW_Permissions);
 
 	// GPU PRNG state (one stream per-pixel/ray-path)
 	CPUMemory::ArrayAllocHandle<GPU_PRNG_Channel> prngState = CPUMemory::AllocateArray<GPU_PRNG_Channel>(screenWidth * screenHeight);
@@ -313,27 +331,31 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 		}
 	}
 
+	// Bind GPU PRNG
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc prng_Desc;
 	prng_Desc.initForStructBuffer<GPU_PRNG_Channel>(screenWidth * screenHeight, L"prngState", prngState);
-	auto gpuPRNG = compute_frame.pipes[0].RegisterStructBuffer(prng_Desc, resrcRW_Permissions);
-	compute_frame.pipes[0].ResolveRootSignature();
+	auto gpuPRNG = compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(prng_Desc, resrcRW_Permissions);
+
+	// Bind morton hashmap, needed for LBVH setup, then resolve root signature
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(mortonHashmapHandle);
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].ResolveRootSignature();
 
 	// Shader registration
 	// Move onto this after verifying resource set-up
 	
 	// One thread/triangle
-	auto csAS_ResolutionHandle = compute_frame.pipes[0].RegisterComputeShader("ComputeAS_Resolve.cso", std::max(numTris / 64u, 1u), 1u, 1u);
-	compute_frame.pipes[0].AppendComputeExec(csAS_ResolutionHandle);
+	auto csAS_ResolutionHandle = compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterComputeShader("ComputeAS_Resolve.cso", std::max(numTris / 64u, 1u), 1u, 1u);
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].AppendComputeExec(csAS_ResolutionHandle);
 
 	// Work-submission legwork quietly automates when we call (or JIT if we wait until SubmitCmdList, whichever)
-	compute_frame.pipes[0].BakeCmdList();
+	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].BakeCmdList();
 
-	// Second compute stage (ray-tracing, output to compute target)
+	// Third compute stage (ray-tracing, output to compute target)
 	///////////////////////////////////////////////////////////////
 
-	compute_frame.pipes[1].init(false);
-	compute_frame.pipes[1].RegisterCBuffer(computeCBufHandle);
-	compute_frame.pipes[1].RegisterStructBuffer(structuredVbuffer);
+	compute_frame.pipes[COMPUTE_STAGES::LT].init(false);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterCBuffer(computeCBufHandle);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(structuredVbuffer);
 
 	// Load/bind materials
 	//////////////////////
@@ -423,9 +445,9 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	// Bind materials & material metadata ^_^
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc materialTable;
 	materialTable.initForStructBuffer<MaterialPropertyEntry>(sceneMaterialCount, L"materialTable", materialEntries);
-	compute_frame.pipes[1].RegisterStructBuffer(materialTable, resrcRW_Permissions); // Kind of incredibly cumbersome - should add support for read-only structbuffers (are they new? they feel new)
-	compute_frame.pipes[1].RegisterStructBuffer(spectralAtlas, resrcRW_Permissions);
-	compute_frame.pipes[1].RegisterTextureSampleable(roughnessAtlas, TEXTURE_ACCESS_DIRECT_READS);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(materialTable, resrcRW_Permissions); // Kind of incredibly cumbersome - should add support for read-only structbuffers (are they new? they feel new)
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(spectralAtlas, resrcRW_Permissions);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterTextureSampleable(roughnessAtlas, TEXTURE_ACCESS_DIRECT_READS);
 
 	GPUResource<ResourceViews::TEXTURE_DIRECT_WRITE>::resrc_desc sppCounter;
 	sppCounter.fmt = StandardResrcFmts::U32_1;
@@ -455,24 +477,24 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	uavTexDesc.resrcName = L"computeTarget";
 
-	compute_frame.pipes[1].RegisterStructBuffer(tribufferHandle);
-	compute_frame.pipes[1].RegisterStructBuffer(customAS);
-	compute_frame.pipes[1].RegisterStructBuffer(gpuPRNG);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(tribufferHandle);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(customAS);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(gpuPRNG);
 
-	compute_frame.pipes[1].RegisterTextureDirectWrite(sppCounter, resrcRW_Permissions);
+	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterTextureDirectWrite(sppCounter, resrcRW_Permissions);
 
 	auto computeTarget = compute_frame.pipes[1].RegisterTextureDirectWrite(uavTexDesc, resrcRW_Permissions);
-	compute_frame.pipes[1].ResolveRootSignature();
+	compute_frame.pipes[COMPUTE_STAGES::LT].ResolveRootSignature();
 
-	auto csTestHandle = compute_frame.pipes[1].RegisterComputeShader("ComputeShader.cso", screenWidth / 8, screenHeight / 8, 1); // 64 threads
-	compute_frame.pipes[1].AppendComputeExec(csTestHandle);
-	compute_frame.pipes[1].BakeCmdList();
+	auto csTestHandle = compute_frame.pipes[1].RegisterComputeShader("ComputeLightTransport.cso", screenWidth / 8, screenHeight / 8, 1); // 64 threads
+	compute_frame.pipes[COMPUTE_STAGES::LT].AppendComputeExec(csTestHandle);
+	compute_frame.pipes[COMPUTE_STAGES::LT].BakeCmdList();
 
-	// Third compute stage (presentation, a graphics stage in practice)
-	compute_frame.pipes[2].init(true);
-	compute_frame.pipes[2].RegisterCBuffer(computeCBufHandle);
-	compute_frame.pipes[2].RegisterVBuffer(viewGeo.vbufferDesc, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC::GENERIC_RESRC_ACCESS_DIRECT_READS);
-	compute_frame.pipes[2].RegisterIBuffer(viewGeo.ibufferDesc, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC::GENERIC_RESRC_ACCESS_DIRECT_READS);
+	// Fourth compute stage (presentation, a graphics stage in practice)
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].init(true);
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterCBuffer(computeCBufHandle);
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterVBuffer(viewGeo.vbufferDesc, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC::GENERIC_RESRC_ACCESS_DIRECT_READS);
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterIBuffer(viewGeo.ibufferDesc, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC::GENERIC_RESRC_ACCESS_DIRECT_READS);
 
 	GPUResource<ResourceViews::TEXTURE_DEPTH_STENCIL>::resrc_desc depthTexDesc;
 	depthTexDesc.fmt = StandardDepthStencilFormats::DEPTH_16_UNORM_NO_STENCIL;
@@ -490,12 +512,12 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	depthTexDesc.resrcName = L"depthTex";
 
-	compute_frame.pipes[2].RegisterDepthStencil(depthTexDesc, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_AS_DEPTH_STENCIL);
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterDepthStencil(depthTexDesc, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_AS_DEPTH_STENCIL);
 
-	compute_frame.pipes[2].EnableStaticSamplers();
-	compute_frame.pipes[2].RegisterTextureSampleable(computeTarget);
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].EnableStaticSamplers();
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterTextureSampleable(computeTarget);
 
-	compute_frame.pipes[2].ResolveRootSignature();
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].ResolveRootSignature();
 
 	RasterSettings rasterSettings = {};
 	rasterSettings.stencil.enabled = false; // No stencilling, not sure if leaving other settings at 0 is ok
@@ -514,8 +536,8 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	rasterSettings.msaaSettings.forcedSamples = 0; // Not sure about that
 	rasterSettings.msaaSettings.qualityTier = 0;
 
-	auto computeFragStage = compute_frame.pipes[2].RegisterGraphicsShader("ComputePresentation.vso", "ComputePresentation.pso", rasterSettings); // Test
-	compute_frame.pipes[2].AppendGFX_Exec(computeFragStage);
+	auto computeFragStage = compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterGraphicsShader("ComputePresentation.vso", "ComputePresentation.pso", rasterSettings);
+	compute_frame.pipes[COMPUTE_STAGES::BLIT].AppendGFX_Exec(computeFragStage);
 
 	// We require state that varies per-frame for presentation (thx swapchain), so we can't bake this cmdlist on-init
 	//compute_frame.pipes[2].BakeCmdList();

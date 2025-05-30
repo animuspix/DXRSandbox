@@ -51,8 +51,17 @@ class Render
 		};
 
 		// Possible frame layouts
-		Frame<3> compute_frame; // AS generation, ubershader, presentation
+		Frame<4> compute_frame; // Sptial hashing, AS generation, ubershader, presentation
 		Frame<3> hybrid_frame; // Primary rays, ubershader, presentation
 		Frame<2> shader_table_frame; // Ray/path dispatch, presentation
+
+		// Constants to easily access each stage (just specified for compute atp)
+		enum COMPUTE_STAGES
+		{
+			SPATIAL_HASHING,
+			AS_GENERATION,
+			LT,
+			BLIT
+		};
 };
 
