@@ -1,67 +1,79 @@
 #pragma once
 
 #include "..\Pipeline.h"
+#include "..\Shader.h"
 #include "..\Shaders\SharedStructs.h"
 #include "Materials.h"
+#include "Frame.h"
+
+#include <functional>
+#include <type_traits>
 
 // Constructs & stores command-lists for compute, hybrid, and fixed-function RT pipelines, then invokes them through DXWrapper::DrawFrame()
 class Render
 {
-	public:
-		struct FrameConstants
-		{
-			float screenWidth, screenHeight; // Screen width, screen height, current time, current deltatime
-			float timeSeconds;
-			float fov, focalDepth, aberration;
-			uint16_t spp;
-			FilmSPD_Piecewise filmSPD;
-			float4 sceneBoundsMin, sceneBoundsMax;
-			transform cameraTransform; // Camera position/rotation
-			transform sceneTransforms[MAX_SUPPORTED_OBJ_TRANSFORMS];
-			uint16_t numTransforms;
-		};
+public:
+	struct FrameConstants
+	{
+		float screenWidth, screenHeight; // Screen width, screen height, current time, current deltatime
+		float timeSeconds;
+		float fov, focalDepth, aberration;
 
-		enum class RENDER_MODE
-		{
-			MODE_COMPUTE,
-			MODE_HYBRID,
-			MODE_SHADER_TABLES
-		};
+		uint16_t spp;
+		FilmSPD_Piecewise filmSPD;
+		float4 sceneBoundsMin, sceneBoundsMax;
 
-		// Command-lists generated here
-		void Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& sceneGeo, XPlatUtils::BakedGeoBuffers& viewGeo, CPUMemory::ArrayAllocHandle<Material> sceneMaterials, uint32_t sceneMaterialCount, CPUMemory::SingleAllocHandle<FrameConstants> frameConstants);
+		transform cameraTransform; // Camera position/rotation
+		transform sceneTransform; // Model position/rotation/scale
+	};
 
-		// Update constant buffer data (e.g. time, film SPD, camera transforms...)
-		void UpdateFrameConstants(CPUMemory::SingleAllocHandle<FrameConstants> frameConstants);
+	enum class RENDER_MODE
+	{
+		MODE_COMPUTE,
+		MODE_HYBRID,
+		MODE_SHADER_TABLES
+	};
 
-		// Issue generated command-lists to the GPU
-		void Draw();
+	// Command-lists generated here
+	void Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& sceneGeo, XPlatUtils::BakedGeoBuffers& viewGeo, Material& material, CPUMemory::SingleAllocHandle<FrameConstants> frameConstants);
 
-	private:
-		// Current rendering mode
-		RENDER_MODE currMode;
+	// Update constant buffer data (e.g. time, film SPD, camera transforms...)
+	void UpdateFrameConstants(CPUMemory::SingleAllocHandle<FrameConstants> frameConstants);
 
-		// Very simple frame abstraction (not a frame graph!) to bucket pipelines associated with the same render modes together
-		// The presentation pipeline is duplicated this way, but I think that's probably better than managing the complexity of having three frames feeding into the same
-		// final stage
-		template<uint32_t numStages>
-		struct Frame
-		{
-			Pipeline pipes[numStages];
-		};
+	// Issue generated command-lists to the GPU
+	void Draw();
 
-		// Possible frame layouts
-		Frame<4> compute_frame; // Sptial hashing, AS generation, ubershader, presentation
-		Frame<3> hybrid_frame; // Primary rays, ubershader, presentation
-		Frame<2> shader_table_frame; // Ray/path dispatch, presentation
+private:
+	// Current rendering mode
+	RENDER_MODE currMode;
 
-		// Constants to easily access each stage (just specified for compute atp)
-		enum COMPUTE_STAGES
-		{
-			SPATIAL_HASHING,
-			AS_GENERATION,
-			LT,
-			BLIT
-		};
+	// Constants to easily access each compute stage
+	enum COMPUTE_STAGES
+	{
+		COMPUTE_SPATIAL_HASHING,
+		COMPUTE_LT,
+		COMPUTE_BLIT,
+		COMPUTE_NUM_STAGES
+	};
+
+	enum HYBRID_STAGES
+	{
+		HYBRID_PRIMARY_RAYS,
+		HYBRID_LT,
+		HYBRID_BLIT,
+		HYBRID_NUM_STAGES
+	};
+
+	enum SHADER_TABLE_STAGES
+	{
+		SHADER_TABLE_DISPATCH,
+		SHADER_TABLE_BLIT,
+		SHADER_TABLE_NUM_STAGES
+	};
+
+	// Possible frame layouts
+	Frame<COMPUTE_STAGES::COMPUTE_NUM_STAGES, (uint32_t)RENDER_MODE::MODE_COMPUTE> compute_frame; // Sptial hashing, ubershader, presentation
+	Frame<HYBRID_STAGES::HYBRID_NUM_STAGES, (uint32_t)RENDER_MODE::MODE_HYBRID> hybrid_frame; // Primary rays, ubershader, presentation
+	Frame<SHADER_TABLE_STAGES::SHADER_TABLE_NUM_STAGES, (uint32_t)RENDER_MODE::MODE_COMPUTE> shader_table_frame; // Ray/path dispatch, presentation
 };
 

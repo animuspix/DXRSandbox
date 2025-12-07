@@ -21,7 +21,21 @@ struct GenericRenderConstants
 	float4 sceneBoundsMin; // AABB scene bounds, for ray culling
 	float4 sceneBoundsMax;
 	transform cameraTransform; // Camera position/rotation
-	transform sceneTransforms[MAX_SUPPORTED_OBJ_TRANSFORMS];
+	transform sceneTransform;
+};
+
+struct SharedComputeBindings
+{
+	uint atomicsLookup;
+	uint bvhLookup;  
+	uint structuredVBufferLookup;
+	uint triBufferLookup;
+};
+
+struct ComputeConstants
+{
+	GenericRenderConstants screenAndLensOptions;
+	SharedComputeBindings computeResourceKeys;
 };
 
 struct IndexedTriangle
@@ -36,6 +50,27 @@ struct MortonHashPair
 };
 
 #define MORTON_BUCKET_ENTRY_COUNT 16
+
+struct SpatialHashBindings
+{
+	uint sharedKeys;
+};
+
+struct LightTransportBindings
+{
+	uint sharedKeys;
+	uint outputTextureLookup;
+	uint sampleCounterLookup;
+	uint roughnessLookup;
+	uint spectralLookup;
+	uint prngStreamsLookup;
+};
+
+struct ComputePresentationBindings
+{
+	uint sharedKeys;
+	uint colorBufferLookup;
+};
 
 struct MortonHashBucket
 {

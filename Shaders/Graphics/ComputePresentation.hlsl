@@ -27,6 +27,8 @@ vtOut main_vs(Vertex2D vtIn)
 #ifdef PIXEL
 float4 main_ps(vtOut px) : SV_TARGET
 {
+    Texture2D<float4> frame_target = GetColorData(stageBindings.colorBufferLookup);
+
     return frame_target.Sample(frame_sampler_linear, float2(px.uv.x, 1.0f - px.uv.y));
 }
 #endif

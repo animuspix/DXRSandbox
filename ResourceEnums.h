@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <type_traits>
+#include <concepts>
 
 enum class ResourceViews
 {
@@ -14,18 +15,44 @@ enum class ResourceViews
 
 	TEXTURE_DIRECT_WRITE,
 	TEXTURE_SUPPORTS_SAMPLING,
-	TEXTURE_STAGING,
 	TEXTURE_RENDER_TARGET,
 	TEXTURE_DEPTH_STENCIL,
+
+	// Staging resourceses are unsupported (fully replaced by queued uploads/downloads)
+
 	RT_ACCEL_STRUCTURE,
 	NUM_VARIANTS
+};
+
+static constexpr uint32_t NUM_RESOURCE_VIEWS = static_cast<uint32_t>(ResourceViews::NUM_VARIANTS);
+
+template<ResourceViews view>
+concept BufferView = requires
+{
+	view == ResourceViews::VBUFFER || view == ResourceViews::IBUFFER || view == ResourceViews::STRUCTBUFFER_RW || view == ResourceViews::CBUFFER;
+};
+
+template<ResourceViews view>
+concept TextureView = requires
+{
+	view == ResourceViews::TEXTURE_DIRECT_WRITE || view == ResourceViews::TEXTURE_SUPPORTS_SAMPLING ||
+		view == ResourceViews::TEXTURE_RENDER_TARGET || view == ResourceViews::TEXTURE_DEPTH_STENCIL;
+};
+
+template<ResourceViews view>
+concept DynamicResourceView = requires
+{
+	view == ResourceViews::VBUFFER ||
+		view == ResourceViews::IBUFFER ||
+		view == ResourceViews::STRUCTBUFFER_RW ||
+		view == ResourceViews::TEXTURE_DIRECT_WRITE || view == ResourceViews::TEXTURE_SUPPORTS_SAMPLING ||
+		view == ResourceViews::TEXTURE_RENDER_TARGET || view == ResourceViews::TEXTURE_DEPTH_STENCIL;
 };
 
 enum class TextureViews
 {
 	DIRECT_WRITE,
 	SUPPORTS_SAMPLING,
-	STAGING,
 	RENDER_TARGET,
 	DEPTH_STENCIL,
 };
@@ -34,38 +61,25 @@ enum class TextureViews
 // Not completely deduceable, because often we want to bind a texture resource as a render-target in one stage, and as a sampled resource (SRV) in another
 enum GPU_RESRC_ACCESS_PERMISSIONS_GENERIC
 {
-	GENERIC_RESRC_ACCESS_DIRECT_READS = 1<<0,
-	GENERIC_RESRC_ACCESS_DIRECT_WRITES = 1<<1
+	GENERIC_RESRC_ACCESS_DIRECT_READS = 1 << 0,
+	GENERIC_RESRC_ACCESS_DIRECT_WRITES = 1 << 1
 };
 
 enum GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES
 {
-	TEXTURE_ACCESS_DIRECT_READS = 1<<0,
-	TEXTURE_ACCESS_DIRECT_WRITES = 1<<1,
-	TEXTURE_ACCESS_AS_RENDER_TARGET = 1<<2,
-	TEXTURE_ACCESS_AS_DEPTH_STENCIL = 1<<3,
-	TEXTURE_ACCESS_COPIES_ONLY = 1<<4 // Required for TEXTURE_STAGING, not combinable with other flags
+	TEXTURE_ACCESS_DIRECT_READS = 1 << 0,
+	TEXTURE_ACCESS_DIRECT_WRITES = 1 << 1,
+	TEXTURE_ACCESS_AS_RENDER_TARGET = 1 << 2,
+	TEXTURE_ACCESS_AS_DEPTH_STENCIL = 1 << 3,
 };
 
 template<typename internalEnumType> requires(std::is_same<internalEnumType, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC>::value ||
-											 std::is_same<internalEnumType, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES>::value)
-struct GPU_RESRC_ACCESS_PERMISSION_SET
+	std::is_same<internalEnumType, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES>::value)
+	struct GPU_RESRC_ACCESS_PERMISSION_SET
 {
 	GPU_RESRC_ACCESS_PERMISSION_SET() : bitset(0) {}
 	GPU_RESRC_ACCESS_PERMISSION_SET(const internalEnumType val) : bitset(static_cast<uint32_t>(val)) {};
-	GPU_RESRC_ACCESS_PERMISSION_SET(const uint32_t val) : bitset(val)
-	{
-		constexpr bool texPerms = std::is_same<internalEnumType, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES>::value;
-		constexpr bool genericPerms = std::is_same<internalEnumType, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC>::value;
-		if (texPerms)
-		{
-			assert(val < (TEXTURE_ACCESS_COPIES_ONLY << 1));
-		}
-		else if (genericPerms)
-		{
-			assert(val <= (GENERIC_RESRC_ACCESS_DIRECT_WRITES << 1));
-		}
-	};
+	GPU_RESRC_ACCESS_PERMISSION_SET(const uint32_t val) : bitset(val) {};
 
 	const bool operator==(const GPU_RESRC_ACCESS_PERMISSIONS_GENERIC v)
 	{
@@ -121,7 +135,7 @@ struct GPU_RESRC_ACCESS_PERMISSION_SET
 		return bitset;
 	}
 
-	private:
+private:
 	uint32_t bitset = 0;
 };
 

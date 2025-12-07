@@ -272,9 +272,9 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 		params.outVerts[1].pos = float4(0.0f, 0.5f, 0.0f, 0.0f);
 		params.outVerts[2].pos = float4(0.5f, -0.5f, 0.0f, 0.0f);
 
-		params.outVerts[0].mat = float4(-0.5f, -0.5f, params.inMaterialID, static_cast<uint8_t>(SCATTERING_FUNCTIONS::OREN_NAYAR)); // OBJ imports are always white + smooth + diffuse
-		params.outVerts[1].mat = float4(0.0f, 0.5f, params.inMaterialID, params.outVerts[0].mat.w);
-		params.outVerts[2].mat = float4(0.5f, -0.5f, params.inMaterialID, params.outVerts[0].mat.w);
+		params.outVerts[0].mat = float4(-0.5f, -0.5f, 0, static_cast<uint8_t>(SCATTERING_FUNCTIONS::OREN_NAYAR)); // OBJ imports are always white + smooth + diffuse
+		params.outVerts[1].mat = float4(0.0f, 0.5f, 0, params.outVerts[0].mat.w);
+		params.outVerts[2].mat = float4(0.5f, -0.5f, 0, params.outVerts[0].mat.w);
 
 		params.outVerts[0].normals = float4(0.0f, 0.0f, -1.0f, 0.0f);
 		params.outVerts[1].normals = float4(0.0f, 0.0f, -1.0f, 0.0f);
@@ -515,7 +515,7 @@ void GeoLoader::LoadObj(const char* path, MeshLoadParams params)
 		for (uint32_t i = 0; i < numUVNdces; i++)
 		{			
 			memcpy(&params.outVerts[uvNdces[i].vt].mat, &uvs[uvNdces[i].attrib * uvStride], sizeof(float) * uvStride);
-			params.outVerts[uvNdces[i].vt].mat.z = params.inMaterialID;
+			params.outVerts[uvNdces[i].vt].mat.z = 0;
 			params.outVerts[uvNdces[i].vt].mat.w = static_cast<uint8_t>(SCATTERING_FUNCTIONS::OREN_NAYAR); // OBJ imports are always white + smooth + diffuse
 		}
 
@@ -598,7 +598,7 @@ void GeoLoader::LoadDXRS(const char* path, MeshLoadParams params)
 
 		params.outVerts[vtNdx].mat.x = vt.u;
 		params.outVerts[vtNdx].mat.x = vt.v;
-		params.outVerts[vtNdx].mat.z = params.inMaterialID;
+		params.outVerts[vtNdx].mat.z = 0;
 		params.outVerts[vtNdx].mat.w = header.scatteringFunction;
 
 		params.outVerts[vtNdx].normals.x = vt.n.x;

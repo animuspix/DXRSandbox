@@ -7,30 +7,23 @@
 #include <fstream>
 #include <filesystem>
 
-Scene::Scene(CPUMemory::ArrayAllocHandle<Model> _models, uint32_t _numModels) : models(_models), numModels(_numModels)
+Scene::Scene(CPUMemory::SingleAllocHandle<Model> _model) : model(_model)
 {
-	memset(&sceneBoundsMin, 0xff, sizeof(float4)); // If we initialize to a small value, some values will never be low enough
-	memset(&sceneBoundsMax, 0, sizeof(float4));
+	// Model translations are centroids, so we should add +/- [scale] on each axis
+	settings.sceneBoundsMin.x = model->gizmos.translationAndScale.x - (model->gizmos.translationAndScale.w * 0.5f);
+	settings.sceneBoundsMin.y = model->gizmos.translationAndScale.y - (model->gizmos.translationAndScale.w * 0.5f);
+	settings.sceneBoundsMin.z = model->gizmos.translationAndScale.z - (model->gizmos.translationAndScale.w * 0.5f);
+	settings.sceneBoundsMin.w = 0;
+	
+	settings.sceneBoundsMax.x = model->gizmos.translationAndScale.x + (model->gizmos.translationAndScale.w * 0.5f);
+	settings.sceneBoundsMax.y = model->gizmos.translationAndScale.y + (model->gizmos.translationAndScale.w * 0.5f);
+	settings.sceneBoundsMax.z = model->gizmos.translationAndScale.z + (model->gizmos.translationAndScale.w * 0.5f);
+	settings.sceneBoundsMax.w = 0;
 
-	assert(_numModels < MAX_SUPPORTED_OBJ_TRANSFORMS);
-	for (uint32_t i = 0; i < _numModels; i++)
-	{
-		// DOD users weep at this code
-		// (when I need to handle thousands of concurrent transform updates I'll fix it)
-		// Model translations are centroids, so we should add +/- [scale] on each axis
-		sceneBoundsMin.x = std::min(models[i].transformations.translationAndScale.x, sceneBoundsMin.x) - models[i].transformations.translationAndScale.w;
-		sceneBoundsMin.y = std::min(models[i].transformations.translationAndScale.y, sceneBoundsMin.y) - models[i].transformations.translationAndScale.w;
-		sceneBoundsMin.z = std::min(models[i].transformations.translationAndScale.z, sceneBoundsMin.z) - models[i].transformations.translationAndScale.w;
+	settings.cameraPosition = float4(0, 0, 0, 1);
+	settings.cameraRotation = float4(0, 0, 0, 1); // (sin(0) * v, cos(0))
 
-		sceneBoundsMax.x = std::max(models[i].transformations.translationAndScale.x, sceneBoundsMax.x) + models[i].transformations.translationAndScale.w;
-		sceneBoundsMax.y = std::max(models[i].transformations.translationAndScale.y, sceneBoundsMax.y) + models[i].transformations.translationAndScale.w;
-		sceneBoundsMax.z = std::max(models[i].transformations.translationAndScale.z, sceneBoundsMax.z) + models[i].transformations.translationAndScale.w;
-	}
-
-	cameraPosition = float4(0, 0, 0, 1);
-	cameraRotation = float4(0, 0, 0, 1); // (sin(0) * v, cos(0))
-
-	vfov = 0.75f * 3.14159f; // Equal to ~135 degrees vfov
+	settings.vfov = 0.75f * 3.14159f; // Equal to ~135 degrees vfov
 	for (uint32_t i = 0; i < FILM_SPD_NUM_SAMPLES; i++)
 	{
 		// Using the response function from https://github.com/animuspix/vox-sculpt/blob/main/vox_sculpt/ by default
@@ -45,33 +38,26 @@ Scene::Scene(CPUMemory::ArrayAllocHandle<Model> _models, uint32_t _numModels) : 
 								 quadratic(rho / 0.4f, -0.6f / 0.4f, 1.0f, -2.3f, false) * 
 								 quadratic(rho, 1.0f, 0.95f, 0.0f, false) + 0.1f, 0.0f);
 
-		filmCMF.spd_sample[i].x = r;
-		filmCMF.spd_sample[i].y = g;
-		filmCMF.spd_sample[i].z = b;
-		filmCMF.spd_sample[i].w = 0.0f;
+		settings.filmCMF.spd_sample[i].x = r;
+		settings.filmCMF.spd_sample[i].y = g;
+		settings.filmCMF.spd_sample[i].z = b;
+		settings.filmCMF.spd_sample[i].w = 0.0f;
 	}
 
-	spp = 16; // Like everything else here, this will be data-driven, eventually ^_^'
+	settings.spp = 16; // Like everything else here, this will be data-driven, eventually ^_^'
 
 	// Not really sure what to set for focal-depth or aberration, sensible-ish placeholders for now
-	focalDepth = 1.0f;
-	aberration = 0.0f;
+	settings.focalDepth = 1.0f;
+	settings.aberration = 0.0f;
 }
 
 struct DXRSS_Header
 {
 	char header[17] = "DXRSandbox_Scene";
-	float4 boundsMin;
-	float4 boundsMax;
-	uint8_t numModels;
-	float4 cameraPosition;
-	float4 cameraRotation;
-	float vfov, focalDepth, aberration;
-	uint16_t spp;
-	FilmSPD_Piecewise filmCMF;
+	Scene::Settings sceneSettings;
 };
 
-CPUMemory::ArrayAllocHandle<Scene::Model> modelData = {};
+CPUMemory::SingleAllocHandle<Scene::Model> modelData = {};
 
 Scene::Scene(const char* path)
 {
@@ -83,25 +69,22 @@ Scene::Scene(const char* path)
 	
 	scene.read(reinterpret_cast<char*>(&headerBytes[0]), sizeof(DXRSS_Header));
 	CPUMemory::CopyData(reinterpret_cast<void*>(&headerBytes[0]), header);
-	
-	numModels = header->numModels;
-	sceneBoundsMin = header->boundsMin;
-	sceneBoundsMax = header->boundsMax;
-	cameraPosition = header->cameraPosition;
-	cameraRotation = header->cameraRotation;
-	vfov = header->vfov;
-	memcpy(&filmCMF, &header->filmCMF, sizeof(FilmSPD_Piecewise));
-	assert(numModels < MAX_SUPPORTED_OBJ_TRANSFORMS);
+
+	settings.sceneBoundsMin = header->sceneSettings.sceneBoundsMin;
+	settings.sceneBoundsMax = header->sceneSettings.sceneBoundsMax;
+	settings.cameraPosition = header->sceneSettings.cameraPosition;
+	settings.cameraRotation = header->sceneSettings.cameraRotation;
+	settings.vfov = header->sceneSettings.vfov;
+	memcpy(&settings.filmCMF, &header->sceneSettings.filmCMF, sizeof(FilmSPD_Piecewise));
 
 	// Load models
-	modelData = CPUMemory::AllocateArray<Model>(numModels);
+	modelData = CPUMemory::AllocateSingle<Model>();
 	
 	CPUMemory::MemSize modelFootprint = 0;
 	char* modelBytes = static_cast<char*>(modelData.GetByteSpan().Bytes(modelFootprint));
-	assert(modelFootprint == numModels * sizeof(Model));
 
 	scene.read(modelBytes, modelFootprint);
-	models = modelData;
+	model = modelData;
 
 	// Release memory
 	CPUMemory::Free(header);
@@ -113,9 +96,8 @@ void Scene::EncodeScene(const char* path)
 
 	// Encode header
 	DXRSS_Header header;
-	header.boundsMin = sceneBoundsMin;
-	header.boundsMax = sceneBoundsMax;
-	header.numModels = numModels;
+	header.sceneSettings.sceneBoundsMin = settings.sceneBoundsMin;
+	header.sceneSettings.sceneBoundsMax = settings.sceneBoundsMax;
 	scene.write(reinterpret_cast<char*>(&header), sizeof(header));
 
 	// Encode models

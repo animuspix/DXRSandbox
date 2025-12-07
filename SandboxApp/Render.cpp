@@ -7,6 +7,7 @@
 
 #include "..\Shaders\SharedConstants.h"
 #include "..\Shaders\SharedPRNG_Code.h"
+#include "..\Shaders\SharedStructs.h"
 
 #include "RenderDebug.h"
 
@@ -16,17 +17,6 @@
 #include <thread>
 #include <random>
 #include <stdio.h>
-
-// Namespaced cbuffers for each rendering mode (compute, hybrid, shader-table)
-//////////////////////////////////////////////////////////////////////////////
-
-namespace ComputeTypes
-{
-	struct ComputeConstants
-	{
-		GenericRenderConstants screenAndLensOptions;
-	};
-}
 
 namespace HybridTypes
 {
@@ -44,16 +34,10 @@ namespace ShaderTableTypes
 	};
 }
 
-// Compute/hybrid/shader-table constants
-PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> computeCBufHandle;
-CPUMemory::SingleAllocHandle<ComputeTypes::ComputeConstants> computeConstants;
-
-PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> hybridCBufHandle;
+// Compute/hybrid/shader-table constants (CPU copies)
+CPUMemory::SingleAllocHandle<ComputeConstants> computeConstants;
 CPUMemory::SingleAllocHandle<HybridTypes::HybridConstants> hybridConstants;
-
-PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> shaderTableCBufHandle;
 CPUMemory::SingleAllocHandle<ShaderTableTypes::ShaderTableConstants> shaderTableComputeConstants;
-
 
 // Generate PRNG seeds using the SplitMix64 generator recommended in the Xoshiro128+ implementation above
 // Cycle the generator twice and stride the output across uints (xoshiro128+ has four uint32s of state)
@@ -136,7 +120,7 @@ void UpdateComputeConstants(CPUMemory::SingleAllocHandle<Render::FrameConstants>
 	computeConstants->screenAndLensOptions.sceneBoundsMin = frameConstants->sceneBoundsMin;
 	computeConstants->screenAndLensOptions.sceneBoundsMax = frameConstants->sceneBoundsMax;
 	computeConstants->screenAndLensOptions.cameraTransform = frameConstants->cameraTransform;
-	memcpy(computeConstants->screenAndLensOptions.sceneTransforms, frameConstants->sceneTransforms, sizeof(transform) * frameConstants->numTransforms);
+	memcpy(&computeConstants->screenAndLensOptions.sceneTransform, &frameConstants->sceneTransform, sizeof(transform));
 }
 
 // Sampling atlassed data
@@ -144,7 +128,7 @@ void UpdateComputeConstants(CPUMemory::SingleAllocHandle<Render::FrameConstants>
 // Roughness data (in texture) - sample as normal (so we get GPU interpolation), but constrain UVs to just inside each atlas entry to prevent bleeding (so (width-1, height-1))
 // Roughness processing might be somewhat easier with manual texel loading & blending, unsure
 
-void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& sceneGeo, XPlatUtils::BakedGeoBuffers& viewGeo, CPUMemory::ArrayAllocHandle<Material> sceneMaterials, uint32_t sceneMaterialCount, CPUMemory::SingleAllocHandle<FrameConstants> frameConstants)
+void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& sceneGeo, XPlatUtils::BakedGeoBuffers& viewGeo, Material& material, CPUMemory::SingleAllocHandle<FrameConstants> frameConstants)
 {
 	// Store the active render mode
 	currMode = mode;
@@ -164,7 +148,9 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	// Compute
 	//////////
 
-	computeConstants = CPUMemory::AllocateSingle<ComputeTypes::ComputeConstants>();
+	// Initialize frame
+	compute_frame.init({ false, false, true });
+	computeConstants = CPUMemory::AllocateSingle<ComputeConstants>();
 
 	// Transforms, when I get around to them -> cbuffer
 	//
@@ -176,9 +162,6 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	// First compute stage (spatial hashing)
 	//////////////////////////////////////
 
-	// Initialize pipeline
-	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].init(false);
-
 	// Resource registration
 	GPUResource<ResourceViews::CBUFFER>::resrc_desc computeCBufDesc;
 
@@ -188,28 +171,19 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	UpdateComputeConstants(frameConstants);
 
 	// Materials
-	// Current packing algorithm sits on the x-axis
-	// Should drive runtime atlas dimensions from calculations here
-	computeConstants->screenAndLensOptions.materialAtlasDims = float4(0.0f, sceneMaterials[0].spectralTexY, 0.0f, sceneMaterials[0].roughnessTexY);
-	for (uint32_t i = 0; i < sceneMaterialCount; i++)
-	{
-		computeConstants->screenAndLensOptions.materialAtlasDims.x += sceneMaterials[0].spectralTexX;
-		computeConstants->screenAndLensOptions.materialAtlasDims.y = std::max(computeConstants->screenAndLensOptions.materialAtlasDims.y, static_cast<float>(sceneMaterials[i].spectralTexY));
+	computeConstants->screenAndLensOptions.materialAtlasDims = float4(material.spectralTexX, material.spectralTexY, material.roughnessTexX, material.roughnessTexY);
 
-		computeConstants->screenAndLensOptions.materialAtlasDims.z += sceneMaterials[0].roughnessTexX;
-		computeConstants->screenAndLensOptions.materialAtlasDims.w = std::max(computeConstants->screenAndLensOptions.materialAtlasDims.w, static_cast<float>(sceneMaterials[i].roughnessTexY));
-	}
-
-	computeCBufDesc.initForCBuffer<ComputeTypes::ComputeConstants>(L"computeConstants", computeConstants);
-	computeCBufHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterCBuffer(computeCBufDesc, GENERIC_RESRC_ACCESS_DIRECT_READS);
+	// CBuffer init/registry
+	computeCBufDesc.initForCBuffer<ComputeConstants>(L"computeConstants", computeConstants);
+	compute_frame.RegisterCBuffer(computeCBufDesc);
 
 	// Vbuffer/Ibuffer
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredVbufferDesc;
 	structuredVbufferDesc.dimensions[0] = sceneGeo.vbufferDesc.dimensions[0];
 	structuredVbufferDesc.initForStructBuffer(sceneGeo.vbufferDesc.dimensions[0], sceneGeo.vbufferDesc.stride, L"structuredVbuffer", sceneGeo.vbufferDesc.srcData);
 
-	constexpr int resrcRW_Permissions = GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES;
-	auto structuredVbuffer = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterStructBuffer(structuredVbufferDesc, resrcRW_Permissions);
+	const GPUResrcPermSetGeneric resrcRW_Permissions = (GENERIC_RESRC_ACCESS_DIRECT_READS | GENERIC_RESRC_ACCESS_DIRECT_WRITES);
+	auto structuredVBuffer = compute_frame.RegisterPersistentResource<ResourceViews::STRUCTBUFFER_RW>(structuredVbufferDesc, resrcRW_Permissions);
 
 	const uint32_t numTris = sceneGeo.ibufferDesc.dimensions[0] / 3;
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc structuredTribufferDesc;
@@ -241,121 +215,52 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	}
 
 	structuredTribufferDesc.initForStructBuffer(numTris, sizeof(IndexedTriangle), L"structuredTribuffer", tribufferMemory.GetByteSpan());
-	auto tribufferHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterStructBuffer(structuredTribufferDesc, resrcRW_Permissions);
+	auto triBuffer = compute_frame.RegisterPersistentResource<ResourceViews::STRUCTBUFFER_RW>(structuredTribufferDesc, resrcRW_Permissions);
 
-	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc mortonHashmapDesc;
-	mortonHashmapDesc.initForStructBuffer(MORTON_HASHMAP_BUCKET_COUNT, sizeof(MortonHashBucket), L"mortonHashmap", CPUMemory::EmptyByteSpan());
-	auto mortonHashmapHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterStructBuffer(mortonHashmapDesc, resrcRW_Permissions);
-
-	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].ResolveRootSignature();
-
-	auto csMorton_ResolutionHandle = compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].RegisterComputeShader("ComputeSpatialHashing.cso", std::max(numTris / 64u, 1u), 1u, 1u);
-	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].AppendComputeExec(csMorton_ResolutionHandle);
-	compute_frame.pipes[COMPUTE_STAGES::SPATIAL_HASHING].BakeCmdList();
-
-	// Second compute stage; AS generation
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].init(false);
-
-	// Bind resources shared with spatial hashing
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterCBuffer(computeCBufHandle);
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(structuredVbuffer);
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(tribufferHandle);
-
-	// AS write-out (16M cells, at most two children each)
+	// AS write-out (seeing if I can get away with just Morton-order tri-indices)
 	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc as_Desc;
-
-	auto computeNumBvhCells = [](const uint32_t numTris)
-	{
-		uint32_t numCells = 0;
-		uint32_t numChildren = numTris;
-		
-		while (numChildren > 0)
-		{
-			numChildren /= AS_NODE_CHILDCOUNT;
-			numCells += numChildren;
-		}
-
-		return numCells;
-	};
-	
-	const CPUMemory::MemSize numCells = computeNumBvhCells(numTris); // Up to eight children per node, supporting more than 1M triangles feels unnecessary
-	CPUMemory::ArrayAllocHandle<ComputeAS_Node> bvhAS = CPUMemory::AllocateArray<ComputeAS_Node>(numCells);
- 
-	// GPU bvh setup plans:
-	// - Buffer structure goes from rank 0 (root node) down to rank N (last before triangles), left-to-right (better for cache, easier to read)
-	// - Implicit clustering using z-ordered indices (see above)
-	// - Nodes have bounds, two children (not 8 - relying on the implicit 3D nature of the z-curve to use a simpler binary search), and a flag
-	//   indicating if their children are leaves/branches
-	// - "Children" in leaf parents are an offset + count (up to 16) into the z-ordered tribuffer
-	// 
-	// - Expanding on binary search impl, root node covers the entire scene; next two cover half each, their children cover 1/4 each, etc
-	// - Branches are tesselating cubes, so bounds should be predictable; check old octree buffer setup for ideas
-	// 
-	// - Traversal
-	// -- Assume sky hits/scene misses if no intersection with the root node
-	// -- Otherwise chase node children
-	// --- Every time we pick a child, increment the current rank & update our traversal coordinates in a history buffer
-	// --- No point tracking children of leaf nodes since they aren't nodes themselves; treat the whole 16-tri intersection test as a simple
-	//     yes/no hit query for the containing leaf
-	// 
-	// -- If we hit a triangle eventually, success!
-	// -- Otherwise (for any miss event, tris or nodes), switch the child selected in the previous rank and try again
-	// -- If we backtrack all the way to the root node, assume the ray intersects the bounding volume but not the actual geometry
-	// 
-	// - Buffer setup should still be GPU-side as much as possible, for simplicity
-	// -- We could put the tribuffer sorting on the gpu using a copy into a second buffer, instead of hardcoding like above; worth
-	//    considering since it would support animations more easily hmmm
-	//
+	CPUMemory::ArrayAllocHandle<uint> bvhAS = CPUMemory::AllocateArray<uint>(numTris);
 
 	// Simple zero-init; cells are populated on the GPU
 	CPUMemory::ZeroData(bvhAS);
 
-	as_Desc.initForStructBuffer<ComputeAS_Node>(numCells, L"octreeAS", bvhAS);
-	auto customAS = compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(as_Desc, resrcRW_Permissions);
+	as_Desc.initForStructBuffer<uint>(numTris, L"octreeAS", bvhAS);
+	auto asBinding = compute_frame.RegisterPersistentResource<ResourceViews::STRUCTBUFFER_RW>(as_Desc, resrcRW_Permissions);
 
-	// GPU PRNG state (one stream per-pixel/ray-path)
-	CPUMemory::ArrayAllocHandle<GPU_PRNG_Channel> prngState = CPUMemory::AllocateArray<GPU_PRNG_Channel>(screenWidth * screenHeight);
-	
-	const uint32_t groupSize = std::min(64u, std::thread::hardware_concurrency());
-	for (uint32_t i = 0; i < screenHeight; i += groupSize)
-	{
-		std::thread threads[64] = {};
-		for (uint32_t t = 0; t < groupSize; t++)
-		{
-			threads[t] = std::thread(PRNGThreadInterface, screenWidth, prngState, i + t, screenHeight);
-		}
-		
-		for (uint32_t t = 0; t < groupSize; t++)
-		{
-			threads[t].join();
-		}
-	}
+	// Atomic U32 buffer setup
+	// Useful for dispatch-wide synchronization (e.g. total ordering for Morton-sorted positions ;p)
+	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc atomics_desc;
 
-	// Bind GPU PRNG
-	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc prng_Desc;
-	prng_Desc.initForStructBuffer<GPU_PRNG_Channel>(screenWidth * screenHeight, L"prngState", prngState);
-	auto gpuPRNG = compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(prng_Desc, resrcRW_Permissions);
+	// Arbitrary element count, anything up to 16k (D3D12 buffer alignment) is probably good
+	atomics_desc.initForStructBuffer(1024u, 4u, L"atomicUIntBuffer", CPUMemory::EmptyByteSpan());
+	auto atomicsBuffer = compute_frame.RegisterPersistentResource<ResourceViews::STRUCTBUFFER_RW>(atomics_desc, resrcRW_Permissions);
 
-	// Bind morton hashmap, needed for LBVH setup, then resolve root signature
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterStructBuffer(mortonHashmapHandle);
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].ResolveRootSignature();
+	// Keys!
+	// Mark-up to guarantee persistent order for shared resources like this will be the next step
+	// hmm
+	// - cbuffer order is preserved automatically on reuse (only one cbuffer/pipeline anyway)
+	// - remainder are shared through overloads on RegisterXXXXX
+	// - could modify those overloads to enforce persistent order?
+	// - will probably work, just very janky
+	// - still think passing resources through frames before sending them to pipelines would be best
+	//   (followed by a Frame::Finalize() or w/e to consolidate everything)
+	// --> In that situation resources would be registered on the frame, which in practice would be filling up an array of pairs [desc | pipeline] and [desc | shared]
+	// --> Finalizing the frame would mean binding all the shared resources at the front of each heap for each pipeline, then following those blocks with the 
+	//	   specialized per-pipeline resources (in their respective heaps, again, so the descriptor heaps would have layouts like [shared][others])
+	// --> After populating specialized resources per-pipeline, root-sig setup would go ahead as normal
+	//
+	// --> Can possibly implement without overly changing ResolveRootSignature(...); the minimal change would be to pass separate global/shared and per-resource pipelines,
+	//	   then just make sure the global resources are always 
 
-	// Shader registration
-	// Move onto this after verifying resource set-up
-	
-	// One thread/triangle
-	auto csAS_ResolutionHandle = compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].RegisterComputeShader("ComputeAS_Resolve.cso", std::max(numTris / 64u, 1u), 1u, 1u);
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].AppendComputeExec(csAS_ResolutionHandle);
+	// Bindless rendering references
+	// https://github.com/DDreher/BasicBindlessRendering
+	// https://microsoft.github.io/DirectX-Specs/d3d/HLSL_SM_6_6_DynamicResources.html
 
-	// Work-submission legwork quietly automates when we call (or JIT if we wait until SubmitCmdList, whichever)
-	compute_frame.pipes[COMPUTE_STAGES::AS_GENERATION].BakeCmdList();
+	auto spatialHashingPass = compute_frame.RegisterComputeShader(COMPUTE_SPATIAL_HASHING, "ComputeSpatialHashing.cso", std::max(numTris / 64u, 1u), 1u, 1u);
+	compute_frame.RegisterShaderExec(spatialHashingPass);
 
 	// Third compute stage (ray-tracing, output to compute target)
 	///////////////////////////////////////////////////////////////
-
-	compute_frame.pipes[COMPUTE_STAGES::LT].init(false);
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterCBuffer(computeCBufHandle);
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(structuredVbuffer);
 
 	// Load/bind materials
 	//////////////////////
@@ -385,69 +290,12 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	roughnessAtlas.dimensions[0] = static_cast<uint32_t>(computeConstants->screenAndLensOptions.materialAtlasDims.z);
 	roughnessAtlas.dimensions[1] = static_cast<uint32_t>(computeConstants->screenAndLensOptions.materialAtlasDims.w);
 
-	// Material memory allocations
-	const uint32_t spectralAtlasFootprint = spectralAtlas.dimensions[0] * spectralAtlas.stride;
-	const uint32_t roughnessAtlasFootprint = roughnessAtlas.dimensions[0] * roughnessAtlas.dimensions[1] * roughnessAtlas.stride;
-
-	// Incredibly hacky to use byte arrays here; we should use typed arrays & array subsets instead, then extract ByteSpans for upload
-	CPUMemory::ArrayAllocHandle<uint8_t> spectralAtlasData = CPUMemory::AllocateArray<uint8_t>(spectralAtlasFootprint);
-	CPUMemory::ArrayAllocHandle<uint8_t> roughnessAtlasData = CPUMemory::AllocateArray<uint8_t>(roughnessAtlasFootprint);
-	CPUMemory::ArrayAllocHandle<MaterialPropertyEntry> materialEntries = CPUMemory::AllocateArray<MaterialPropertyEntry>(sceneMaterialCount);
-
-	// Atlas into allocated memory
-	// Very naive packing, all on X
-	uint16_t atlasX_OffsSpectral = 0;
-	uint16_t atlasX_OffsRoughness = 0;
-	for (uint32_t i = 0; i < sceneMaterialCount; i++)
-	{
-		// Atlas spectral data
-		//////////////////////
-
-		const uint32_t spectralSubresrcWidth = spectralAtlas.stride * sceneMaterials[i].spectralTexX;
-		const uint32_t spectralResrcWidth = spectralAtlas.stride * spectralAtlas.dimensions[0];
-
-		materialEntries[i].spectralWidth = sceneMaterials[i].spectralTexX;
-		materialEntries[i].spectralHeight = sceneMaterials[i].spectralTexY;
-		materialEntries[i].spectralOffsetU = static_cast<float>(atlasX_OffsSpectral) / spectralResrcWidth;
-		materialEntries[i].spectralOffsetV = 0; // For now! May change if we use a different packing algorithm
-
-		uint16_t atlasY_OffsSpectral = 0;
-		for (uint32_t y = 0; y < sceneMaterials[i].spectralTexY; y++)
-		{
-			memcpy(&spectralAtlasData[0] + atlasX_OffsSpectral + atlasY_OffsSpectral, &sceneMaterials[i].spectralData[0], spectralSubresrcWidth);
-			atlasY_OffsSpectral += spectralResrcWidth;
-		}
-		atlasX_OffsSpectral += spectralSubresrcWidth;
-
-		// Atlas roughness data
-		///////////////////////
-
-		const uint32_t roughnessSubresrcWidth = roughnessAtlas.stride * sceneMaterials[i].roughnessTexX;
-		const uint32_t roughnessResrcWidth = roughnessAtlas.stride * roughnessAtlas.dimensions[0];
-
-		materialEntries[i].roughnessWidth = sceneMaterials[i].roughnessTexX;
-		materialEntries[i].roughnessHeight = sceneMaterials[i].roughnessTexY;
-		materialEntries[i].roughnessOffsetU = static_cast<float>(atlasX_OffsRoughness) / roughnessResrcWidth;
-		materialEntries[i].roughnessOffsetV = 0; // For now! May change if we use a different packing algorithm
-
-		uint16_t atlasY_OffsRoughness = 0;
-		for (uint32_t y = 0; y < sceneMaterials[i].roughnessTexY; y++)
-		{
-			memcpy(&roughnessAtlasData[0] + atlasX_OffsRoughness + atlasY_OffsRoughness, &sceneMaterials[i].roughnessData[0] + (roughnessSubresrcWidth * y), roughnessSubresrcWidth);
-			atlasY_OffsRoughness += roughnessResrcWidth;
-		}
-		atlasX_OffsRoughness += roughnessSubresrcWidth;
-	}
-
-	spectralAtlas.srcData = spectralAtlasData.GetByteSpan();
-	roughnessAtlas.srcData = roughnessAtlasData.GetByteSpan();
+	spectralAtlas.srcData = material.spectralData.GetByteSpan();
+	roughnessAtlas.srcData = material.roughnessData.GetByteSpan();
 
 	// Bind materials & material metadata ^_^
-	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc materialTable;
-	materialTable.initForStructBuffer<MaterialPropertyEntry>(sceneMaterialCount, L"materialTable", materialEntries);
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(materialTable, resrcRW_Permissions); // Kind of incredibly cumbersome - should add support for read-only structbuffers (are they new? they feel new)
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(spectralAtlas, resrcRW_Permissions);
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterTextureSampleable(roughnessAtlas, TEXTURE_ACCESS_DIRECT_READS);
+	auto spectralTex = compute_frame.RegisterPerStageResource<ResourceViews::STRUCTBUFFER_RW>(spectralAtlas, COMPUTE_STAGES::COMPUTE_LT, resrcRW_Permissions);
+	auto roughnessTex = compute_frame.RegisterPerStageResource<ResourceViews::TEXTURE_SUPPORTS_SAMPLING>(roughnessAtlas, COMPUTE_STAGES::COMPUTE_LT, TEXTURE_ACCESS_DIRECT_READS);
 
 	GPUResource<ResourceViews::TEXTURE_DIRECT_WRITE>::resrc_desc sppCounter;
 	sppCounter.fmt = StandardResrcFmts::U32_1;
@@ -477,24 +325,39 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	uavTexDesc.resrcName = L"computeTarget";
 
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(tribufferHandle);
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(customAS);
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterStructBuffer(gpuPRNG);
+	// GPU PRNG state (one stream per-pixel/ray-path)
+	CPUMemory::ArrayAllocHandle<GPU_PRNG_Channel> prngState = CPUMemory::AllocateArray<GPU_PRNG_Channel>(screenWidth * screenHeight);
 
-	compute_frame.pipes[COMPUTE_STAGES::LT].RegisterTextureDirectWrite(sppCounter, resrcRW_Permissions);
+	const uint32_t groupSize = std::min(64u, std::thread::hardware_concurrency());
+	for (uint32_t i = 0; i < screenHeight; i += groupSize)
+	{
+		std::thread threads[64] = {};
+		for (uint32_t t = 0; t < groupSize; t++)
+		{
+			threads[t] = std::thread(PRNGThreadInterface, screenWidth, prngState, i + t, screenHeight);
+		}
 
-	auto computeTarget = compute_frame.pipes[1].RegisterTextureDirectWrite(uavTexDesc, resrcRW_Permissions);
-	compute_frame.pipes[COMPUTE_STAGES::LT].ResolveRootSignature();
+		for (uint32_t t = 0; t < groupSize; t++)
+		{
+			threads[t].join();
+		}
+	}
 
-	auto csTestHandle = compute_frame.pipes[1].RegisterComputeShader("ComputeLightTransport.cso", screenWidth / 8, screenHeight / 8, 1); // 64 threads
-	compute_frame.pipes[COMPUTE_STAGES::LT].AppendComputeExec(csTestHandle);
-	compute_frame.pipes[COMPUTE_STAGES::LT].BakeCmdList();
+	GPUResource<ResourceViews::STRUCTBUFFER_RW>::resrc_desc prng_Desc;
+	prng_Desc.initForStructBuffer<GPU_PRNG_Channel>(screenWidth * screenHeight, L"prngState", prngState);
+	auto prng = compute_frame.RegisterPerStageResource<ResourceViews::STRUCTBUFFER_RW>(prng_Desc, COMPUTE_LT, resrcRW_Permissions);
+
+	GPUResrcPermSetTextures textureRW_Permissions = (TEXTURE_ACCESS_DIRECT_READS | TEXTURE_ACCESS_DIRECT_WRITES);
+	auto sampleCounter = compute_frame.RegisterPerStageResource<ResourceViews::TEXTURE_DIRECT_WRITE>(sppCounter, COMPUTE_LT, textureRW_Permissions);
+
+	auto computeTarget = compute_frame.RegisterPerStageResource<ResourceViews::TEXTURE_DIRECT_WRITE>(uavTexDesc, COMPUTE_LT, TEXTURE_ACCESS_DIRECT_WRITES | TEXTURE_ACCESS_DIRECT_READS);
+
+	auto computeLightPass = compute_frame.RegisterComputeShader(COMPUTE_LT, "ComputeLightTransport.cso", screenWidth / 8, screenHeight / 8, 1); // 64 threads
+	compute_frame.RegisterShaderExec(computeLightPass);
 
 	// Fourth compute stage (presentation, a graphics stage in practice)
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].init(true);
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterCBuffer(computeCBufHandle);
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterVBuffer(viewGeo.vbufferDesc, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC::GENERIC_RESRC_ACCESS_DIRECT_READS);
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterIBuffer(viewGeo.ibufferDesc, GPU_RESRC_ACCESS_PERMISSIONS_GENERIC::GENERIC_RESRC_ACCESS_DIRECT_READS);
+	auto vbuffer = compute_frame.RegisterPerStageResource<ResourceViews::VBUFFER>(viewGeo.vbufferDesc, COMPUTE_BLIT, GENERIC_RESRC_ACCESS_DIRECT_READS);
+	auto ibuffer = compute_frame.RegisterPerStageResource<ResourceViews::IBUFFER>(viewGeo.ibufferDesc, COMPUTE_BLIT, GENERIC_RESRC_ACCESS_DIRECT_READS);
 
 	GPUResource<ResourceViews::TEXTURE_DEPTH_STENCIL>::resrc_desc depthTexDesc;
 	depthTexDesc.fmt = StandardDepthStencilFormats::DEPTH_16_UNORM_NO_STENCIL;
@@ -512,12 +375,9 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 
 	depthTexDesc.resrcName = L"depthTex";
 
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterDepthStencil(depthTexDesc, GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_AS_DEPTH_STENCIL);
-
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].EnableStaticSamplers();
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterTextureSampleable(computeTarget);
-
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].ResolveRootSignature();
+	compute_frame.RegisterPerStageResource<ResourceViews::TEXTURE_DEPTH_STENCIL>(depthTexDesc, COMPUTE_BLIT, TEXTURE_ACCESS_AS_DEPTH_STENCIL);
+	auto computeTargetAsBlitSource = compute_frame.TransitionResource<ResourceViews::TEXTURE_DIRECT_WRITE, ResourceViews::TEXTURE_SUPPORTS_SAMPLING>(computeTarget, COMPUTE_BLIT);
+	compute_frame.EnableStaticSamplers(COMPUTE_BLIT);
 
 	RasterSettings rasterSettings = {};
 	rasterSettings.stencil.enabled = false; // No stencilling, not sure if leaving other settings at 0 is ok
@@ -536,11 +396,51 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	rasterSettings.msaaSettings.forcedSamples = 0; // Not sure about that
 	rasterSettings.msaaSettings.qualityTier = 0;
 
-	auto computeFragStage = compute_frame.pipes[COMPUTE_STAGES::BLIT].RegisterGraphicsShader("ComputePresentation.vso", "ComputePresentation.pso", rasterSettings);
-	compute_frame.pipes[COMPUTE_STAGES::BLIT].AppendGFX_Exec(computeFragStage);
+	auto computeFragStage = compute_frame.RegisterGraphicsShader(COMPUTE_BLIT, "ComputePresentation.vso", "ComputePresentation.pso", rasterSettings);
+	compute_frame.RegisterShaderExec(computeFragStage);
 
-	// We require state that varies per-frame for presentation (thx swapchain), so we can't bake this cmdlist on-init
-	//compute_frame.pipes[2].BakeCmdList();
+	// Resolve assorted frame bindings/events into concrete GPU work
+	compute_frame.Finalize();
+
+	// Recover & sort shared resource keys
+	computeConstants->computeResourceKeys.atomicsLookup = compute_frame.GetGPUKeyForPersistentBinding(atomicsBuffer);
+	computeConstants->computeResourceKeys.bvhLookup = compute_frame.GetGPUKeyForPersistentBinding(asBinding);
+	computeConstants->computeResourceKeys.structuredVBufferLookup = compute_frame.GetGPUKeyForPersistentBinding(structuredVBuffer);
+	computeConstants->computeResourceKeys.triBufferLookup = compute_frame.GetGPUKeyForPersistentBinding(triBuffer);
+
+	// Recover & sort per-stage resource keys
+	decltype(compute_frame)::SortedResourceKeys computeResourceKeys = {};
+
+	// First index is shared keys, see SharedStructs.h (PerStageResourceKeys)
+	// Compute target is written by light transport, read by blit/presentation
+	const uint32_t computeCBufferKey = compute_frame.GetGPUKeyForCBuffer();
+	const uint32_t computeTargetKey = compute_frame.GetGPUKeyForStageBinding(computeTarget);
+
+	SpatialHashBindings spatialBindings;
+	spatialBindings.sharedKeys = computeCBufferKey;
+
+	LightTransportBindings ltBindings = {};
+	ltBindings.sharedKeys = computeCBufferKey;
+	ltBindings.outputTextureLookup = computeTargetKey;
+	ltBindings.sampleCounterLookup = compute_frame.GetGPUKeyForStageBinding(sampleCounter);
+	ltBindings.roughnessLookup = compute_frame.GetGPUKeyForStageBinding(roughnessTex);
+	ltBindings.spectralLookup = compute_frame.GetGPUKeyForStageBinding(spectralTex);
+	ltBindings.prngStreamsLookup = compute_frame.GetGPUKeyForStageBinding(prng);
+
+	ComputePresentationBindings presentBindings = {};
+	presentBindings.sharedKeys = computeCBufferKey;
+	presentBindings.colorBufferLookup = compute_frame.GetGPUKeyForStageRebinding(computeTargetAsBlitSource);
+
+	// Easy memcpy
+	memcpy(computeResourceKeys.constants[COMPUTE_SPATIAL_HASHING].data(), &spatialBindings, sizeof(spatialBindings));
+	memcpy(computeResourceKeys.constants[COMPUTE_LT].data(), &ltBindings, sizeof(ltBindings));
+	memcpy(computeResourceKeys.constants[COMPUTE_BLIT].data(), &presentBindings, sizeof(presentBindings));
+	computeResourceKeys.numActiveConstants[COMPUTE_SPATIAL_HASHING] = 1;
+	computeResourceKeys.numActiveConstants[COMPUTE_LT] = sizeof(ltBindings) / sizeof(uint32_t);
+	computeResourceKeys.numActiveConstants[COMPUTE_BLIT] = sizeof(presentBindings) / sizeof(uint32_t);
+
+	// Bake command-lists
+	compute_frame.BakeCmdLists(computeResourceKeys);
 
 	// Hybrid
 	/////////
@@ -558,20 +458,29 @@ void Render::Init(HWND hwnd, RENDER_MODE mode, XPlatUtils::BakedGeoBuffers& scen
 	//shader_table_frame.pipes[0].BakeCmdList();
 
 	// Memory clean-up
-	CPUMemory::Free(spectralAtlasData);
-	CPUMemory::Free(roughnessAtlasData);
-	CPUMemory::Free(materialEntries);
-	CPUMemory::Free(prngState);
-	CPUMemory::Free(bvhAS);
-	CPUMemory::Free(tribufferMemory);
+	//CPUMemory::Free(prngState);
+	//CPUMemory::Free(bvhAS);
+	//CPUMemory::Free(tribufferMemory);
 }
 
 void Render::UpdateFrameConstants(CPUMemory::SingleAllocHandle<FrameConstants> frameConstants)
 {
-	UpdateComputeConstants(frameConstants);
-
-	auto cbufResrc = compute_frame.pipes[0].DecodeCBufferHandle(computeCBufHandle);
-	cbufResrc->UpdateData(computeConstants.GetByteSpan());
+	switch (currMode)
+	{
+	case RENDER_MODE::MODE_COMPUTE:
+		UpdateComputeConstants(frameConstants);
+		compute_frame.UpdateCBuffer(computeConstants.GetByteSpan());
+		break;
+	case RENDER_MODE::MODE_HYBRID:
+		//UpdateHybridConstants(frameConstants);
+		break;
+	case RENDER_MODE::MODE_SHADER_TABLES:
+		//UpdateShaderTableConstants(frameConstants);
+		break;
+	default:
+		assert(false); // Missing case!
+		break;
+	}
 }
 
 void Render::Draw()
@@ -586,20 +495,18 @@ void Render::Draw()
 
 	switch (currMode)
 	{
-		case RENDER_MODE::MODE_COMPUTE:
-			compute_frame.pipes[0].SubmitCmdList(false);
-			compute_frame.pipes[1].SubmitCmdList(false);
-			compute_frame.pipes[2].SubmitCmdList(false);
-			break;
-		case RENDER_MODE::MODE_HYBRID:
-			hybrid_frame.pipes[0].SubmitCmdList(false);
-			break;
-		case RENDER_MODE::MODE_SHADER_TABLES:
-			shader_table_frame.pipes[0].SubmitCmdList(false);
-			break;
-		default:
-			assert(false); // Unsupported mode (spooky, indicates possible memory corruption)
-			break;
+	case RENDER_MODE::MODE_COMPUTE:
+		compute_frame.SubmitPipes();
+		break;
+	case RENDER_MODE::MODE_HYBRID:
+		hybrid_frame.SubmitPipes();
+		break;
+	case RENDER_MODE::MODE_SHADER_TABLES:
+		shader_table_frame.SubmitPipes();
+		break;
+	default:
+		assert(false); // Unsupported mode (spooky, indicates possible memory corruption)
+		break;
 	}
 	DXWrapper::PresentLastFrame();
 

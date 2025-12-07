@@ -171,157 +171,208 @@ bool aabbHit(Ray ray, float3 aabbMin, float3 aabbMax)
     return tMinMax.x <= tMinMax.y;
 }
 
-// Takes per-rank tree coordinates, returns absolute offset within the octree/tribuffer
-uint DecodeOctreeCoordinate(uint currentRank, uint coordinate[6], out bool leafNode)
-{
-    uint currAS_Node = 0;
-    uint currAS_NodeWithBranchFlag = 0;
-    ComputeAS_Node lastParent = bvhAS[0];
-    for (uint i = 1; i < currentRank; i++)
-    {
-        uint childNdx = coordinate[i];
-        currAS_Node = lastParent.children[childNdx];
-        currAS_NodeWithBranchFlag = currAS_Node;
-        
-        currAS_Node &= ~(1<<25); // Should see if I have a define for this somewhere
-        lastParent = bvhAS[currAS_Node];
-    }
-
-    leafNode = currAS_NodeWithBranchFlag & (1<<25);
-    return currAS_Node;
-}
-
-void UpdateOctreeCoordinate(inout uint currentRank, inout uint coordinate[6])
-{
-    // If we have untested children left, check those too
-    if (coordinate[currentRank] < 3)
-    {
-        coordinate[currentRank]++; 
-    }
-    else // If none of the local leaf nodes intersect, mess with the previous rank
-    {
-        coordinate[currentRank] = 0;
-        coordinate[currentRank - 1]++;
-        currentRank--;
-    }
-}
+//bool aabbTest(float3 pt, float3 minBounds, float3 maxBounds)
+//{
+//    return all(pt > minBounds) && all(pt < maxBounds);
+//}
 
 [numthreads(8, 8, 1)]
 void main( uint3 DTid : SV_DispatchThreadID )
 {
-    float screenWidth = computeCBuffer.screenAndLensOptions.screenAndTime.x;
-    float screenHeight = computeCBuffer.screenAndLensOptions.screenAndTime.y;
+    ConstantBuffer<ComputeConstants> sharedConstants = GetSharedConstants(stageBindings.sharedKeys);
+    RWStructuredBuffer<GPU_PRNG_Channel> prngPathStreams = GetPRNGStreams(stageBindings.prngStreamsLookup);
+
+    float screenWidth = sharedConstants.screenAndLensOptions.screenAndTime.x;
+    float screenHeight = sharedConstants.screenAndLensOptions.screenAndTime.y;
     uint linPixID = DTid.x + (DTid.y * screenHeight);
     GPU_PRNG_Channel prngChannel = prngPathStreams[linPixID];
-
-    // Test render! Verifying ray directions
-    float spectralSample = rand(prngChannel);
-    float4 lensSettings = computeCBuffer.screenAndLensOptions.lensSettings;
-    float4 ray = RaySetup(DTid.xy, lensSettings.x, float2(screenWidth, screenHeight), lensSettings.w, prngChannel, spectralSample);    
-
-    texOut[DTid.xy] = float4(ray.xyz, 1.0f);
-    return;
-
-    // Verifying PRNG
-    //texOut[DTid.xy] = float4(rand3d(prngChannel), 1.0f);
-
-    // - Verifying spectral samples & film CMF
-    //texOut[DTid.xy] = float4(ResolveSpectralColor(float(DTid.x) / screenWidth, computeCBuffer.screenAndLensOptions.filmSPD), 1.0f);
-    //texOut[DTid.xy] = float4(ResolveSpectralColor(spectralSample, computeCBuffer.screenAndLensOptions.filmSPD), 1.0f);
-
-    // Verifying triangle intersection
-    float3 camPos = computeCBuffer.screenAndLensOptions.cameraTransform.translationAndScale.xyz;
+//
+//    // Test render! Verifying ray directions
+//    float spectralSample = rand(prngChannel);
+//    float4 lensSettings = sharedConstants.screenAndLensOptions.lensSettings;
+//    float4 ray = RaySetup(DTid.xy, lensSettings.x, float2(screenWidth, screenHeight), lensSettings.w, prngChannel, spectralSample);    
+//
+//    // Verifying PRNG
+//    //texOut[DTid.xy] = float4(rand3d(prngChannel), 1.0f);
+//
+//    // - Verifying spectral samples & film CMF
+//    //texOut[DTid.xy] = float4(ResolveSpectralColor(float(DTid.x) / screenWidth, sharedConstants.screenAndLensOptions.filmSPD), 1.0f);
+//    //texOut[DTid.xy] = float4(ResolveSpectralColor(spectralSample, sharedConstants.screenAndLensOptions.filmSPD), 1.0f);
+//
+//    // Verifying triangle intersection
+//    float3 camPos = sharedConstants.screenAndLensOptions.cameraTransform.translationAndScale.xyz;
+//    
+//    // We assume no camera rotation, and z+ goes into the screen
+//    float time = sharedConstants.screenAndLensOptions.screenAndTime.z;                   
+//    camPos.x = cos(time) * 4.0f;
+//    camPos.y = sin(time) * 4.0f;
+//    camPos.z = abs(sin(time)) * -4.0f;
+//
+//    Ray _ray;
+//    _ray.origin = camPos;
+//    _ray.dir = ray.xyz;
+//    
+//    ResolveRayTransforms(_ray);
+//
+//    // First demo case - test ray vs all triangles
+//    float3 bary = 0.0f.xxx;
+//    float distance = 9999.0f;
+//    bool triSect = false;
+//    float3 normal = 0.0f.xxx;
+//
+//    // Passable traversal implementation below, but no support for bounces;
+//    // really feels like (on my 9999th time dealing with this :x) that you can't
+//    // do an AS implementation without some kind of backtracking/history process
+//    // to handle rays starting from inside geometry
+//    // ...
+//    // Probablyyyy going to continue (current bvh impl is miles away from
+//    // stability anyway), but going to revisit once I'm getting some test renders
+//    // with primary bounces
+//    //
+//    // Secondary bounce setup per-se shouldn't be tricky, same use-case as traversing
+//    // from anywhere else in geometry; it's a regular trace except it starts from
+//    // the mesh surface + one of the triangles is masked out
+//    //
+//    // Secondary bounces & near-miss rays have the same problem; need to be able to
+//    // dig back out from the bottom AS layer to the next possible intersection in the
+//    // scene, except near-miss rays ignore their entire bucket, whereas bounce rays
+//    // only ignore the current triangle
+//    // 
+//    // Somewhat tempted to frame secondary/near-miss bounces as restarts with a mask
+//    // factor
+//    // e.g; if a ray bounces, or misses, treat it like another primary ray passing
+//    // through the same point but ignoring anything behind the near-miss/hit point
+//    //
+//    // Might be easier than backtracking rays, though still worth testing other rays
+//    // in the same bucket for bounces; straightforward, no reason to dig all the way
+//    // through the AS again if we don't need to
+//    //
+//
+//    // Traversal metadata
+//    // Trying to interpret Morton key/value pairs as a KD-tree
+//    // Absolutely not suitable for complex scenes (more than one object, non-normalized scale)...
+//    // ...but tbh I don't think complex scenes are a good idea ^_^' I think I'm going to progressively
+//    // remove support for them and avoid the scope creep
+//    //
+//    // Bounds wouldn't change super hugely; just rescale based on the transform attached to the current AABB in each 
+//    // loop iteration
+//    uint axis = 0; // X = 0, Y = 1, Z = 2
+//    float3 minBounds = sharedConstants.screenAndLensOptions.sceneBoundsMin.xyz;
+//    float3 maxBounds = sharedConstants.screenAndLensOptions.sceneBoundsMax.xyz; 
+//    
+//    uint numMortonBuckets = 0; uint bvhAS_Stride = 0;
+//    
+//    RWStructuredBuffer<uint> bvhAS = GetBVH(sharedConstants.computeResourceKeys.bvhLookup);
+//    bvhAS.GetDimensions(numMortonBuckets, bvhAS_Stride);
+//
+//    int bvhOffset = 0;
+//    int bvhCutCounter = 0;
+//
+//    // Needs retracing; naive depth-first tree traversal works if you hit something on the last rank, but fails for misses;
+//    // you can't return a hit (obvi), but you also can't bail on the ray until you test where else it could go
+//
+//    // Traverse LBVH
+//    // No bounces for now, just run to first hit
+//    bool traversingAS = false;//aabbHit(ray, minBounds, maxBounds);
+//    float4 asRGBA = float4(1.0f, 0.5f, 0.25f, 0.0f);
+//    while (traversingAS)
+//    {
+//        // Traversal function assumes triangles (morton codes) are ordered like
+//        // x0,y0,z0, x1,y1,z1, x2,y2,z2...
+//        // See ComputeSpatialHashing.hlsl -> packMortonCode(...)
+//
+//        float3 halfBounds = (maxBounds - minBounds) * 0.5f;
+//        
+//        float3 axisMask = 0.0f.xxx;
+//        axisMask[axis] = 1.0f;
+//        halfBounds *= axisMask;
+//    
+//        // Test against the lower side of the current axis (x, y, z)
+//        bool leftHit = aabbHit(_ray, minBounds, maxBounds - halfBounds);
+//        if (leftHit) 
+//        {
+//            maxBounds.x -= halfBounds.x; // Mask-off right side
+//        }
+//        else
+//        {
+//            // Change bounds anyway; we intersect the object AABB, so we have to hit one of the sides
+//            minBounds.x += halfBounds.x; // Mask-off left side
+//        }
+//
+//        // Each time we test half the scene volume we eliminate one bit/half the candidate buckets
+//        numMortonBuckets /= 2;
+//
+//        // If we hit the left side of the AS every test, we'd end up testing the very first bucket
+//        // in the BVH, on the left side, which is where it starts
+//        // So I feel like it makes the most sense to only update the cursor when we hit volumes on
+//        // the right (and in that case, to jump past all the leftward buckets we just missed)
+//        if (!leftHit)
+//        {
+//            bvhOffset += numMortonBuckets;        
+//        }
+//
+//        axis = (axis + 1) % 3;
+//        bvhCutCounter++;
+//
+//        // Eventually we're going to cut finer than the actual leaf nodes/Morton buckets in the bvh
+//        // Once we get to that point, cut to the chase and test the remaining cells directly
+//        if (bvhCutCounter == MORTON_SPATIAL_RES)
+//        {
+//            for (int bucketWalker = 0; bucketWalker < numMortonBuckets; bucketWalker++)
+//            {
+//                break;
+//                // MortonHashBucket bucket = bvhAS[bvhOffset + bucketWalker];
+//                // int numLeaves = bucket.entryCount;
+//                // for (int leafWalker = 0; leafWalker < numLeaves; leafWalker++)
+//                // {
+//                //     IndexedTriangle tri = triBuffer[bucket.triNdces[leafWalker]];
+//                //     Vertex3D verts[3] = { structuredVBuffer[tri.xyz.x], structuredVBuffer[tri.xyz.y], structuredVBuffer[tri.xyz.z] };
+//                //     float3x3 vpositions = float3x3(verts[0].pos.xyz, verts[1].pos.xyz, verts[2].pos.xyz);
+//                    
+//                //     float distTmp = 0;
+//                //     float3 baryTmp = 0;
+//                //     bool triSectLocal = triHit(vpositions, _ray, distTmp, baryTmp);
+//                    
+//                //     if (triSectLocal)
+//                //     { 
+//                //         if (distTmp < distance)
+//                //         {
+//                //             distance = distTmp;
+//                //             bary = baryTmp;
+//                //             normal = verts[0].normals.xyz * bary.x +
+//                //                      verts[1].normals.xyz * bary.y +
+//                //                      verts[2].normals.xyz * bary.z;
+//                //         }
+//
+//                //         triSect = true;
+//                //         traversingAS = false; // Single bounce implementation, for now
+//                //         asRGBA.g = 1.0f; // Green tint for triangle hits
+//                //     }
+//
+//                //     // Bounce handling (shading etc) here
+//                //     // Reset leaf iterator & assign leaf mask before checking for nearby bounces
+//                //     // (might as well check locally before zooming back out to rank 0)
+//                // }
+//
+//                // For near-misses & far bounces
+//                // - Restart from rank 0, with updated ray origin +/- direction
+//                // - Ignore the missed bucket + any AS subsets unreachable from the current bucket w/ the current ray origin/direction
+//                //   (TBD how to actually do that filtering, some should come automatically with the AABB hit function, but not sure how much)
+//            }
+//
+//            // Sticking to single bounces, no near-miss handling; too hard for now ^_^' need more confidence
+//            // in the current system before getting onto thorny things like that
+//            if (!triSect)
+//            {
+//                // Assume no intersections, break-out
+//                break;
+//            }
+//        }
+//
+//    }
+//
+    RWTexture2D<float4> texOut = GetOutputTexture(stageBindings.outputTextureLookup);
     
-    // We assume no camera rotation, and z+ goes into the screen
-    float time = computeCBuffer.screenAndLensOptions.screenAndTime.z;                   
-    camPos.x = cos(time) * 4.0f;
-    camPos.y = sin(time) * 4.0f;
-    camPos.z = abs(sin(time)) * -4.0f;
-
-    Ray _ray;
-    _ray.origin = camPos;
-    _ray.dir = ray.xyz;
-    
-    ResolveRayTransforms(_ray);
-
-    // First demo case - test ray vs all triangles
-    // Should populate this at home, with access to PIX - expecting some thorny oversights
-    float3 bary = 0.0f.xxx;
-    float distance = 9999.0f;
-    bool triSect = false;
-    float3 normal = 0.0f.xxx;
-
-    // Traverse AS
-    uint currOctreeRank = 0;
-    bool traversingAS = false; // Skip traversal until AS setup is sorted
-
-    // Tree coordinates of each octree probe/ray; each index is a rank, and their values are offsets within them (max offsets determined by [AS_NODE_CHILDCOUNT])
-    uint octreeProbeCoordinates[6] = { 0, 0, 0, 0, 0, 0 }; // See maxOctreeRank, Render.cpp; should move that definition to a header I can read from HLSL
-
-    float4 asRGBA = float4(1.0f, 0.5f, 0.25f, 0.0f);
-    while (traversingAS)
-    {
-        // Resolve currAS_Node from current probe history
-        bool leafNode = true;
-        uint currAS_Node = DecodeOctreeCoordinate(currOctreeRank, octreeProbeCoordinates, leafNode);
-
-        bool currentRankMiss = false;
-        if (leafNode)
-        {
-            IndexedTriangle tri = triBuffer[currAS_Node];
-            Vertex3D verts[3] = { structuredVBuffer[tri.xyz.x], structuredVBuffer[tri.xyz.y], structuredVBuffer[tri.xyz.z] };
-            float3x3 vpositions = float3x3(verts[0].pos.xyz, verts[1].pos.xyz, verts[2].pos.xyz);
-
-            float distTmp = 0;
-            float3 baryTmp = 0;
-            bool triSectLocal = triHit(vpositions, _ray, distTmp, baryTmp);
-            currentRankMiss = !triSectLocal;
-
-            if (triSectLocal)
-            { 
-                if (distTmp < distance)
-                {
-                    distance = distTmp;
-                    bary = baryTmp;
-                    normal = verts[0].normals.xyz * bary.x +
-                             verts[1].normals.xyz * bary.y +
-                             verts[2].normals.xyz * bary.z;
-                }
-
-                triSect = true;
-                traversingAS = false;
-                asRGBA.g = 1.0f; // Green tint for triangle hits
-            }
-        }
-        else
-        {
-            ComputeAS_Node asNode = bvhAS[currAS_Node];
-            bool missRay = false;
-
-            // Test the current node
-            currentRankMiss = !aabbHit(_ray, asNode.bounds[0].xyz, asNode.bounds[1].xyz);
-            if (!currentRankMiss)
-            {
-                // Move to the next rank
-                currOctreeRank++;
-            }
-        }
-
-        if (currentRankMiss)
-        {
-            // If the current ray misses all children of the root node, the ray has missed entirely
-            traversingAS = currOctreeRank == 1 ? (octreeProbeCoordinates[1] < 3) : true;
-            if (traversingAS)
-            {
-                // Try another child on the same rank; if no more children, retreat to the previous rank
-                UpdateOctreeCoordinate(currOctreeRank, octreeProbeCoordinates);        
-
-                // Blue tint for miss rays
-                asRGBA.b = 1.0f;
-            }
-        }
-    }
-    
-    texOut[DTid.xy] = asRGBA;
+    texOut[DTid.xy] = float4(1.0f, 0.5f, 0.25f, 1.0f);
     prngPathStreams[linPixID] = prngChannel;
 }

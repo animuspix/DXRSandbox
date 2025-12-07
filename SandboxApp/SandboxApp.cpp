@@ -57,44 +57,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     modelTransform.rotation = float4(0, 0, 0, 1); // Identity quaternion
     modelTransform.translationAndScale = float4(0, 0, 0, 1); // Test model sits at the origin, unit scale
 
-    CPUMemory::ArrayAllocHandle<Scene::Model> testModels = CPUMemory::AllocateArray<Scene::Model>(MAX_SUPPORTED_OBJ_TRANSFORMS);
-    testModels[0] = { "../Tests/Models/stanford-bunny.obj", SCENE_MODEL_FORMATS::OBJ, modelTransform }; // Implement loading for scenes/scene definitions eventually
+    CPUMemory::SingleAllocHandle<Scene::Model> testModel = CPUMemory::AllocateSingle<Scene::Model>();
+    *testModel = { "../Tests/Models/stanford-bunny.obj", SCENE_MODEL_FORMATS::OBJ, modelTransform }; // Implement loading for scenes/scene definitions eventually
 
-    Scene testScene(testModels, 1);
-    Geo::Init(1, &testScene);
-
-    uint32_t numMaterials = 0;
-    CPUMemory::ArrayAllocHandle<Material> sceneMaterials = {};
-    Geo::SceneMaterialList(sceneMaterials, &numMaterials, 0);
+    Scene testScene(testModel);
+    Geo::Init(&testScene);
 
     CPUMemory::SingleAllocHandle<Render::FrameConstants> frameConstants = CPUMemory::AllocateSingle<Render::FrameConstants>();
 
     frameConstants->screenWidth = ui::window_width;
     frameConstants->screenHeight = ui::window_height;
     frameConstants->timeSeconds = 0;
-    frameConstants->fov = testScene.vfov;
-    frameConstants->focalDepth = testScene.focalDepth;
-    frameConstants->aberration = testScene.aberration;
-    frameConstants->spp = testScene.spp;
-    frameConstants->filmSPD = testScene.filmCMF;
+    frameConstants->fov = testScene.settings.vfov;
+    frameConstants->focalDepth = testScene.settings.focalDepth;
+    frameConstants->aberration = testScene.settings.aberration;
+    frameConstants->spp = testScene.settings.spp;
+    frameConstants->filmSPD = testScene.settings.filmCMF;
 
-    frameConstants->cameraTransform.translationAndScale.x = testScene.cameraPosition.x;
-    frameConstants->cameraTransform.translationAndScale.y = testScene.cameraPosition.y;
-    frameConstants->cameraTransform.translationAndScale.z = testScene.cameraPosition.z;
-    frameConstants->cameraTransform.rotation = testScene.cameraRotation;
+    frameConstants->cameraTransform.translationAndScale.x = testScene.settings.cameraPosition.x;
+    frameConstants->cameraTransform.translationAndScale.y = testScene.settings.cameraPosition.y;
+    frameConstants->cameraTransform.translationAndScale.z = testScene.settings.cameraPosition.z;
+    frameConstants->cameraTransform.rotation = testScene.settings.cameraRotation;
 
-    for (uint32_t i = 0; i < testScene.numModels; i++)
-    {
-        frameConstants->sceneTransforms[i] = testScene.models[i].transformations;
-    }
-
-    frameConstants->sceneBoundsMin = testScene.sceneBoundsMin;
-    frameConstants->sceneBoundsMax = testScene.sceneBoundsMax;
-
-    frameConstants->numTransforms = testScene.numModels;
+    frameConstants->sceneBoundsMin = testScene.settings.sceneBoundsMin;
+    frameConstants->sceneBoundsMax = testScene.settings.sceneBoundsMax;
+    frameConstants->sceneTransform = testScene.model->gizmos;
 
     CPUMemory::SingleAllocHandle<Render> rndr = CPUMemory::AllocateSingle<Render>();
-    rndr->Init(hwnd, Render::RENDER_MODE::MODE_COMPUTE, Geo::SceneGeo(0), Geo::ViewGeo(), sceneMaterials, numMaterials, frameConstants); // Default to compute mode - simplest CPU side setup, likely easiest to test
+    rndr->Init(hwnd, Render::RENDER_MODE::MODE_COMPUTE, Geo::SceneGeo(), Geo::ViewGeo(), Geo::SceneMaterial(), frameConstants); // Default to compute mode - simplest CPU side setup, likely easiest to test
 
     HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_DXRSANDBOX));
 

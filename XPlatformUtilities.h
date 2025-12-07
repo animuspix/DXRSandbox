@@ -13,6 +13,7 @@ namespace XPlatConstants
 	static constexpr uint32_t maxNumRaytracingShaders = 32; // Random arbitrary number, could be anything
 	static constexpr uint32_t maxNumComputeShaders = 32; // Random arbitrary number, could be anything
 	static constexpr uint32_t numBackBuffers = 2;
+	static constexpr uint32_t maxNumRootConstants = maxResourcesPerPipeline;
 	static constexpr uint32_t maxNumRenderTargetsPerPipeline() // Additional render-targets beyond this can be bound as read/write textures
 	{
 #ifdef DX12

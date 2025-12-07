@@ -18,7 +18,7 @@ class CPUMemory
 		// Note the first 4MB or so are reserved for internal book-keeping
 		// (buffers of allocations etc, needed if we want to support frees
 		// within the allocator and not just off the end)
-		static constexpr uint64_t initAlloc = 1024 * 1024 * 512; // ~512MiB
+		static constexpr uint64_t initAlloc = 1024 * 1024 * 1024;
 #endif
 
 	private:

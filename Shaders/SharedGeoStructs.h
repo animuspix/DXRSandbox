@@ -17,7 +17,10 @@ struct Vertex3D
 {
 	#ifdef _WIN32
 		float4 pos; // W is unused
-		float4 mat; // UVs in x,y, material/model ID in z, scattering function ID in w
+
+		// UVs in x,y, z undefined (formerly model ID - I realized multiple models was massive scope creep), scattering function ID in w
+		float4 mat;
+
 		float4 normals; // W is unused
 	#else
 		float4 pos : POSITION; // W is unused

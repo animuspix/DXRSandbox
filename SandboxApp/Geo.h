@@ -10,10 +10,10 @@ class Geo
 public:
 #include "..\Shaders\SharedGeoStructs.h" // Icky namespacing hack
 
-	static void Init(uint32_t numScenes, Scene* scenes);
+	static void Init(Scene* scene);
 	
 	static XPlatUtils::BakedGeoBuffers& ViewGeo();
-	static XPlatUtils::BakedGeoBuffers& SceneGeo(uint32_t sceneNdx);
-	static void SceneMaterialList(CPUMemory::ArrayAllocHandle<Material>& outMaterials, uint32_t* outNumMaterials, uint32_t sceneNdx);
+	static XPlatUtils::BakedGeoBuffers& SceneGeo();
+	static Material& SceneMaterial();
 };
 

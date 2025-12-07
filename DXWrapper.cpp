@@ -41,9 +41,10 @@ enum RT_DISAMBIG_OPTIONS
 
 struct D3DResource
 {
-    ComPtr<ID3D12Resource> resrc = nullptr;
-    ResourceViews curr_variant = ResourceViews::CBUFFER; // BLAS and TLAS structures both carry the [RT_ACCEL_STRUCTURE] variant for compatibility with user-facing RHI code
+	ComPtr<ID3D12Resource> resrc = nullptr;
+	ResourceViews curr_variant = ResourceViews::CBUFFER; // BLAS and TLAS structures both carry the [RT_ACCEL_STRUCTURE] variant for compatibility with user-facing RHI code
 	RT_DISAMBIG_OPTIONS rt_settings = NOT_RT_AS; // Required to disambiguate BLAS/TLAS structure specializations for resource comparisons + safe AS updates
+
 	bool is_variant_supported[(int32_t)ResourceViews::NUM_VARIANTS] = {}; // Probably unreasonably high, but a safe upper bound + better than handing staleness if we set a lower cap and end up needing more
 	bool initialized = false; // Resources are expected to be initialized with copies/clears either immediately on creation, or sometime before their first use
 };
@@ -108,39 +109,39 @@ uint32_t numRT_PSOs[XPlatConstants::maxNumPipelines] = {};
 // Clever memory safety things here are obsolesced by [tracked_ptr], but easier to keep them and take the performance hit than refactor
 struct InputLayoutDesc
 {
-	private:
-		D3D12_INPUT_LAYOUT_DESC apiLayoutDesc = {};
-		CPUMemory::ArrayAllocHandle<D3D12_INPUT_ELEMENT_DESC> inputElementDescsAlloc;
-		size_t eltsFootprint = 0;
+private:
+	D3D12_INPUT_LAYOUT_DESC apiLayoutDesc = {};
+	CPUMemory::ArrayAllocHandle<D3D12_INPUT_ELEMENT_DESC> inputElementDescsAlloc;
+	size_t eltsFootprint = 0;
 
-	public:
-		void Init(UINT numElements, CPUMemory::ArrayAllocHandle<D3D12_INPUT_ELEMENT_DESC> srcDescs, size_t _eltsFootprint)
-		{
-			eltsFootprint = _eltsFootprint;
-			inputElementDescsAlloc = CPUMemory::AllocateArray<D3D12_INPUT_ELEMENT_DESC>(numElements);
-			CPUMemory::CopyData(srcDescs, inputElementDescsAlloc);
-			apiLayoutDesc.pInputElementDescs = &inputElementDescsAlloc[0];
-			apiLayoutDesc.NumElements = numElements;
-		};
+public:
+	void Init(UINT numElements, CPUMemory::ArrayAllocHandle<D3D12_INPUT_ELEMENT_DESC> srcDescs, size_t _eltsFootprint)
+	{
+		eltsFootprint = _eltsFootprint;
+		inputElementDescsAlloc = CPUMemory::AllocateArray<D3D12_INPUT_ELEMENT_DESC>(numElements);
+		CPUMemory::CopyData(srcDescs, inputElementDescsAlloc);
+		apiLayoutDesc.pInputElementDescs = &inputElementDescsAlloc[0];
+		apiLayoutDesc.NumElements = numElements;
+	};
 
-		D3D12_INPUT_LAYOUT_DESC GetDesc()
-		{
-			// Precondition - apiLayoutDesc.pInputElementDescs must equal inputElementDescsAlloc, they can drift apart when our allocator
-			// de-fragments (reallocating [inputElementDescsAlloc]) on releasing other data
-			apiLayoutDesc.pInputElementDescs = &inputElementDescsAlloc[0];
-			return apiLayoutDesc;
-		}
+	D3D12_INPUT_LAYOUT_DESC GetDesc()
+	{
+		// Precondition - apiLayoutDesc.pInputElementDescs must equal inputElementDescsAlloc, they can drift apart when our allocator
+		// de-fragments (reallocating [inputElementDescsAlloc]) on releasing other data
+		apiLayoutDesc.pInputElementDescs = &inputElementDescsAlloc[0];
+		return apiLayoutDesc;
+	}
 
-		uint32_t GetNumElements()
-		{
-			return apiLayoutDesc.NumElements;
-		}
+	uint32_t GetNumElements()
+	{
+		return apiLayoutDesc.NumElements;
+	}
 
-		bool Compare(CPUMemory::ArrayAllocHandle<D3D12_INPUT_ELEMENT_DESC> elts, size_t bytesComparing)
-		{
-			assert(bytesComparing <= eltsFootprint);
-			return (CPUMemory::CompareData<D3D12_INPUT_ELEMENT_DESC>(elts, inputElementDescsAlloc) == 0);
-		}
+	bool Compare(CPUMemory::ArrayAllocHandle<D3D12_INPUT_ELEMENT_DESC> elts, size_t bytesComparing)
+	{
+		assert(bytesComparing <= eltsFootprint);
+		return (CPUMemory::CompareData<D3D12_INPUT_ELEMENT_DESC>(elts, inputElementDescsAlloc) == 0);
+	}
 };
 
 InputLayoutDesc rasterInputLayouts[maxResources]; // Worst-case scenario where all resources are different vbuffers
@@ -219,7 +220,7 @@ enum HEAP_TYPES
 	NUM_HEAP_TYPES
 };
 
-constexpr uint32_t maxBytesPerHeap = 1024 * 1024 * 128; // 96MB heaps, to fit entirely on chip memory for laptops - feasible? no idea :D but curious to try
+constexpr uint32_t maxBytesPerHeap = 1024 * 1024 * 112; // 112MB heaps, to fit entirely on chip memory for laptops - feasible? no idea :D but curious to try
 constexpr uint32_t maxResourceBytes = maxBytesPerHeap * NUM_HEAP_TYPES;
 
 // Total RHI usage is assumed to be total resource usage + 10MB worth of descriptors/shaders/etc (hopefully plenty)
@@ -236,14 +237,41 @@ uint64_t d3dSetupTime = 0;
 D3D12_VIEWPORT viewport = {};
 D3D12_RECT scissor = {};
 
+// Deferred upload metadata, to help improve barrier/copy scheduling
+
+struct TextureUploadEvent
+{
+	D3D12_TEXTURE_COPY_LOCATION copySrc;
+	D3D12_TEXTURE_COPY_LOCATION copyDest;
+
+	D3D12_BOX srcBox;
+};
+
+struct BufferUploadEvent
+{
+	Microsoft::WRL::ComPtr<ID3D12Resource> dstResrc; // Temporary resource used to upload data to the GPU
+	Microsoft::WRL::ComPtr<ID3D12Resource> srcResrc;
+	uint64_t resrcFootprint;
+};
+
+TextureUploadEvent textureUploadEvents[maxTmpResources] = {};
+BufferUploadEvent bufferUploadEvents[maxTmpResources] = {};
+D3D12_RESOURCE_BARRIER uploadBarriers[maxTmpResources] = {};
+
+// Number of copy barriers is equal to numBufferUploadEvents + numTextureUploadEvents (each copy has one barrier)
+uint32_t numBufferUploadEvents = 0;
+uint32_t numTextureUploadEvents = 0;
+
 static bool vsyncActive = false;
 bool DXWrapper::Init(HWND hwnd, uint32_t screenWidth, uint32_t screenHeight, bool vsynced)
 {
 	// Initialize the debug layer when _DEBUG is defined
-	#ifdef _DEBUG
-		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer))))
-		{ debugLayer->EnableDebugLayer(); }
-	#endif
+#ifdef _DEBUG
+	if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer))))
+	{
+		debugLayer->EnableDebugLayer();
+	}
+#endif
 
 	// Create a DXGI builder object
 	Microsoft::WRL::ComPtr<IDXGIFactory2> dxgiBuilder = nullptr;
@@ -259,8 +287,8 @@ bool DXWrapper::Init(HWND hwnd, uint32_t screenWidth, uint32_t screenHeight, boo
 	Microsoft::WRL::ComPtr<IDXGIAdapter1> gpuHW = nullptr;
 	bool dgpuFound = false;
 	for (UINT adapterNdx = 0;
-		 dxgiBuilder->EnumAdapters1(adapterNdx, &gpuHW) != DXGI_ERROR_NOT_FOUND;
-		 adapterNdx += 1) // Iterate over all available adapters
+		dxgiBuilder->EnumAdapters1(adapterNdx, &gpuHW) != DXGI_ERROR_NOT_FOUND;
+		adapterNdx += 1) // Iterate over all available adapters
 	{
 		DXGI_ADAPTER_DESC1 tmpGPUInfo;
 		hr = gpuHW->GetDesc1(&tmpGPUInfo); // Get descriptions for iterated adapters
@@ -314,15 +342,15 @@ bool DXWrapper::Init(HWND hwnd, uint32_t screenWidth, uint32_t screenHeight, boo
 	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	swapChainDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
 	swapChainDesc.Flags = vsynced ? 0 : DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING; // Disabling vsync might be needed for hardware-sync systems like
-																			// G-Sync or Freesync (also for performance debugging/verification)
+	// G-Sync or Freesync (also for performance debugging/verification)
 
 	D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_12_1;
 	hr = dxgiBuilder->CreateSwapChainForHwnd(gfxQueue.Get(), // Not actually the device pointer; see: https://docs.microsoft.com/en-us/windows/desktop/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforhwnd
-											 hwnd,
-											 &swapChainDesc,
-											 nullptr,
-											 nullptr,
-											 &swapChain);
+		hwnd,
+		&swapChainDesc,
+		nullptr,
+		nullptr,
+		&swapChain);
 	assert(SUCCEEDED(hr));
 
 	// Create cpu/gpu synchronization fences + events
@@ -346,8 +374,8 @@ bool DXWrapper::Init(HWND hwnd, uint32_t screenWidth, uint32_t screenHeight, boo
 		D3D12_HEAP_DESC heapDesc;
 		heapDesc.SizeInBytes = maxBytesPerHeap;
 		heapDesc.Properties.Type = (i == HEAP_TYPES::UPLOAD_HEAP) ? D3D12_HEAP_TYPE::D3D12_HEAP_TYPE_UPLOAD :
-								   (i == HEAP_TYPES::DOWNLOAD_HEAP) ? D3D12_HEAP_TYPE::D3D12_HEAP_TYPE_READBACK :
-								   /*(i == HEAP_TYPES::GPU_ONLY_HEAP) ? */D3D12_HEAP_TYPE::D3D12_HEAP_TYPE_DEFAULT;
+			(i == HEAP_TYPES::DOWNLOAD_HEAP) ? D3D12_HEAP_TYPE::D3D12_HEAP_TYPE_READBACK :
+			/*(i == HEAP_TYPES::GPU_ONLY_HEAP) ? */D3D12_HEAP_TYPE::D3D12_HEAP_TYPE_DEFAULT;
 
 		heapDesc.Properties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 		heapDesc.Properties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN; // Not enough information about target hardware to decide this
@@ -523,12 +551,12 @@ template<D3D_OBJ_FMT objFmt>
 D3D12_GPU_VIRTUAL_ADDRESS GetGPUAddress(DXWrapper::DataHandle<objFmt> handle)
 {
 	static_assert(objFmt == D3D_OBJ_FMT::D3D_CBUFFER ||
-				  objFmt == D3D_OBJ_FMT::D3D_VBUFFER ||
-				  objFmt == D3D_OBJ_FMT::D3D_IBUFFER ||
-				  objFmt == D3D_OBJ_FMT::D3D_TEXTURE ||
-				  objFmt == D3D_OBJ_FMT::D3D_STRUCTBUFFER ||
-				  objFmt == D3D_OBJ_FMT::D3D_ACCELSTRUCT_BLAS ||
-				  objFmt == D3D_OBJ_FMT::D3D_ACCELSTRUCT_TLAS, "GPU virtual addresses are only supported for textures, buffers, and acceleration structures");
+		objFmt == D3D_OBJ_FMT::D3D_VBUFFER ||
+		objFmt == D3D_OBJ_FMT::D3D_IBUFFER ||
+		objFmt == D3D_OBJ_FMT::D3D_TEXTURE ||
+		objFmt == D3D_OBJ_FMT::D3D_STRUCTBUFFER ||
+		objFmt == D3D_OBJ_FMT::D3D_ACCELSTRUCT_BLAS ||
+		objFmt == D3D_OBJ_FMT::D3D_ACCELSTRUCT_TLAS, "GPU virtual addresses are only supported for textures, buffers, and acceleration structures");
 	return resources[handle.index].resrc->GetGPUVirtualAddress();
 }
 
@@ -543,90 +571,90 @@ DXGI_FORMAT DecodeSandboxStdFormats(StandardResrcFmts fmt)
 	switch (fmt)
 	{
 		// 32bpc floating-point formats
-		case StandardResrcFmts::FP32_1:
-			return DXGI_FORMAT_R32_FLOAT;
-		case StandardResrcFmts::FP32_2:
-			return DXGI_FORMAT_R32G32_FLOAT;
-		case StandardResrcFmts::FP32_3:
-			return DXGI_FORMAT_R32G32B32_FLOAT;
-		case StandardResrcFmts::FP32_4:
-			return DXGI_FORMAT_R32G32B32A32_FLOAT;
+	case StandardResrcFmts::FP32_1:
+		return DXGI_FORMAT_R32_FLOAT;
+	case StandardResrcFmts::FP32_2:
+		return DXGI_FORMAT_R32G32_FLOAT;
+	case StandardResrcFmts::FP32_3:
+		return DXGI_FORMAT_R32G32B32_FLOAT;
+	case StandardResrcFmts::FP32_4:
+		return DXGI_FORMAT_R32G32B32A32_FLOAT;
 
-			// 16bpc floating-point formats
-		case StandardResrcFmts::FP16_1:
-			return DXGI_FORMAT_R16_FLOAT;
-		case StandardResrcFmts::FP16_2:
-			return DXGI_FORMAT_R16G16_FLOAT;
+		// 16bpc floating-point formats
+	case StandardResrcFmts::FP16_1:
+		return DXGI_FORMAT_R16_FLOAT;
+	case StandardResrcFmts::FP16_2:
+		return DXGI_FORMAT_R16G16_FLOAT;
 		//case StandardResrcFmts::FP16_3:
 		//	return DXGI_FORMAT_R16G16B16_FLOAT;
-		case StandardResrcFmts::FP16_4:
-			return DXGI_FORMAT_R16G16B16A16_FLOAT;
+	case StandardResrcFmts::FP16_4:
+		return DXGI_FORMAT_R16G16B16A16_FLOAT;
 
 		// 32bpc unsigned integer formats
-		case StandardResrcFmts::U32_1:
-			return DXGI_FORMAT_R32_UINT;
-		case StandardResrcFmts::U32_2:
-			return DXGI_FORMAT_R32G32_UINT;
-		case StandardResrcFmts::U32_3:
-			return DXGI_FORMAT_R32G32B32_UINT;
-		case StandardResrcFmts::U32_4:
-			return DXGI_FORMAT_R32G32B32A32_UINT;
+	case StandardResrcFmts::U32_1:
+		return DXGI_FORMAT_R32_UINT;
+	case StandardResrcFmts::U32_2:
+		return DXGI_FORMAT_R32G32_UINT;
+	case StandardResrcFmts::U32_3:
+		return DXGI_FORMAT_R32G32B32_UINT;
+	case StandardResrcFmts::U32_4:
+		return DXGI_FORMAT_R32G32B32A32_UINT;
 
-			// 16bpc unsigned integer formats
-		case StandardResrcFmts::U16_1:
-			return DXGI_FORMAT_R16_UINT;
-		case StandardResrcFmts::U16_2:
-			return DXGI_FORMAT_R16G16_UINT;
+		// 16bpc unsigned integer formats
+	case StandardResrcFmts::U16_1:
+		return DXGI_FORMAT_R16_UINT;
+	case StandardResrcFmts::U16_2:
+		return DXGI_FORMAT_R16G16_UINT;
 		//case StandardResrcFmts::U16_3:
 		//	return DXGI_FORMAT_R16G16B16_UINT;
-		case StandardResrcFmts::U16_4:
-			return DXGI_FORMAT_R16G16B16A16_UINT;
+	case StandardResrcFmts::U16_4:
+		return DXGI_FORMAT_R16G16B16A16_UINT;
 
 		// 8bpc unsigned integer formats
-		case StandardResrcFmts::U8_1:
-			return DXGI_FORMAT_R8_UINT;
-		case StandardResrcFmts::U8_2:
-			return DXGI_FORMAT_R8G8_UINT;
+	case StandardResrcFmts::U8_1:
+		return DXGI_FORMAT_R8_UINT;
+	case StandardResrcFmts::U8_2:
+		return DXGI_FORMAT_R8G8_UINT;
 		//case StandardResrcFmts::U8_3:
 		//	return DXGI_FORMAT_R8G8B8_UINT;
-		case StandardResrcFmts::U8_4:
-			return DXGI_FORMAT_R8G8B8A8_UINT;
+	case StandardResrcFmts::U8_4:
+		return DXGI_FORMAT_R8G8B8A8_UINT;
 
 		// 32bpc signed integer formats
-		case StandardResrcFmts::S32_1:
-			return DXGI_FORMAT_R32_SINT;
-		case StandardResrcFmts::S32_2:
-			return DXGI_FORMAT_R32G32_SINT;
-		case StandardResrcFmts::S32_3:
-			return DXGI_FORMAT_R32G32B32_SINT;
-		case StandardResrcFmts::S32_4:
-			return DXGI_FORMAT_R32G32B32A32_SINT;
+	case StandardResrcFmts::S32_1:
+		return DXGI_FORMAT_R32_SINT;
+	case StandardResrcFmts::S32_2:
+		return DXGI_FORMAT_R32G32_SINT;
+	case StandardResrcFmts::S32_3:
+		return DXGI_FORMAT_R32G32B32_SINT;
+	case StandardResrcFmts::S32_4:
+		return DXGI_FORMAT_R32G32B32A32_SINT;
 
 		// 16bpc signed integer formats
-		case StandardResrcFmts::S16_1:
-			return DXGI_FORMAT_R16_UINT;
-		case StandardResrcFmts::S16_2:
-			return DXGI_FORMAT_R16G16_UINT;
+	case StandardResrcFmts::S16_1:
+		return DXGI_FORMAT_R16_UINT;
+	case StandardResrcFmts::S16_2:
+		return DXGI_FORMAT_R16G16_UINT;
 		//case StandardResrcFmts::S16_3:
 		//	return DXGI_FORMAT_R16G16B16_SINT;
-		case StandardResrcFmts::S16_4:
-			return DXGI_FORMAT_R16G16B16A16_UINT;
+	case StandardResrcFmts::S16_4:
+		return DXGI_FORMAT_R16G16B16A16_UINT;
 
 		// 8bpc signed integer formats
-		case StandardResrcFmts::S8_1:
-			return DXGI_FORMAT_R8_SINT;
-		case StandardResrcFmts::S8_2:
-			return DXGI_FORMAT_R8G8_SINT;
+	case StandardResrcFmts::S8_1:
+		return DXGI_FORMAT_R8_SINT;
+	case StandardResrcFmts::S8_2:
+		return DXGI_FORMAT_R8G8_SINT;
 		//case StandardResrcFmts::S8_3:
 		//	return DXGI_FORMAT_R8G8B8_SINT;
-		case StandardResrcFmts::S8_4:
-			return DXGI_FORMAT_R8G8B8A8_SINT;
+	case StandardResrcFmts::S8_4:
+		return DXGI_FORMAT_R8G8B8A8_SINT;
 
 		// Catch-all case for resource formats we don't want to support/which aren't representable by DXGI_FORMAT
-		default:
-			assert(false); // Resource format unavailable in DX12 :(
-			printf("Tried to decode an unsupported color format ([StandardResrcFmt]) on D3D12; format index: %i\n", (uint8_t)fmt);
-			return DXGI_FORMAT_R16G16B16A16_FLOAT; // Relatively safe default format
+	default:
+		assert(false); // Resource format unavailable in DX12 :(
+		printf("Tried to decode an unsupported color format ([StandardResrcFmt]) on D3D12; format index: %i\n", (uint8_t)fmt);
+		return DXGI_FORMAT_R16G16B16A16_FLOAT; // Relatively safe default format
 	};
 }
 
@@ -636,20 +664,20 @@ DXGI_FORMAT DecodeSandboxDepthStencilFormats(StandardDepthStencilFormats fmt)
 	switch (fmt)
 	{
 		// 32bpc floating-point formats
-		case StandardDepthStencilFormats::DEPTH_16_UNORM_NO_STENCIL:
-			return DXGI_FORMAT_D16_UNORM;
-		case StandardDepthStencilFormats::DEPTH_24_UNORM_STENCIL_8:
-			return DXGI_FORMAT_D24_UNORM_S8_UINT;
-		case StandardDepthStencilFormats::DEPTH_32_FLOAT_NO_STENCIL:
-			return DXGI_FORMAT_D32_FLOAT;
-		case StandardDepthStencilFormats::DEPTH_32_FLOAT_STENCIL_8_PAD_24:
-			return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+	case StandardDepthStencilFormats::DEPTH_16_UNORM_NO_STENCIL:
+		return DXGI_FORMAT_D16_UNORM;
+	case StandardDepthStencilFormats::DEPTH_24_UNORM_STENCIL_8:
+		return DXGI_FORMAT_D24_UNORM_S8_UINT;
+	case StandardDepthStencilFormats::DEPTH_32_FLOAT_NO_STENCIL:
+		return DXGI_FORMAT_D32_FLOAT;
+	case StandardDepthStencilFormats::DEPTH_32_FLOAT_STENCIL_8_PAD_24:
+		return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
 
-			// Catch-all case for resource formats we don't want to support/which aren't representable by DXGI_FORMAT
-		default:
-			assert(false); // Resource format unavailable in DX12 :(
-			printf("Tried to decode an unsupported depth-stencil format on D3D12; format index: %i\n", (uint8_t)fmt);
-			return DXGI_FORMAT_D24_UNORM_S8_UINT; // Relatively safe default format
+		// Catch-all case for resource formats we don't want to support/which aren't representable by DXGI_FORMAT
+	default:
+		assert(false); // Resource format unavailable in DX12 :(
+		printf("Tried to decode an unsupported depth-stencil format on D3D12; format index: %i\n", (uint8_t)fmt);
+		return DXGI_FORMAT_D24_UNORM_S8_UINT; // Relatively safe default format
 	};
 }
 
@@ -658,26 +686,26 @@ DXGI_FORMAT DecodeSandboxIBufferFormats(StandardIBufferFmts fmt)
 	switch (fmt)
 	{
 		// 32bpc floating-point formats
-		case StandardIBufferFmts::S16:
-			return DXGI_FORMAT_R16_SINT;
-		case StandardIBufferFmts::S32:
-			return DXGI_FORMAT_R32_SINT;
-		case StandardIBufferFmts::U16:
-			return DXGI_FORMAT_R16_UINT;
-		case StandardIBufferFmts::U32:
-			return DXGI_FORMAT_R32_UINT;
+	case StandardIBufferFmts::S16:
+		return DXGI_FORMAT_R16_SINT;
+	case StandardIBufferFmts::S32:
+		return DXGI_FORMAT_R32_SINT;
+	case StandardIBufferFmts::U16:
+		return DXGI_FORMAT_R16_UINT;
+	case StandardIBufferFmts::U32:
+		return DXGI_FORMAT_R32_UINT;
 
-			// Catch-all case for resource formats we don't want to support/which aren't representable by DXGI_FORMAT
-		default:
-			assert(false); // Resource format unavailable in DX12 :(
-			printf("Tried to decode an unsupported index-buffer format on D3D12; format index: %i\n", (uint8_t)fmt);
-			return DXGI_FORMAT_R16_SINT; // Relatively safe default format
+		// Catch-all case for resource formats we don't want to support/which aren't representable by DXGI_FORMAT
+	default:
+		assert(false); // Resource format unavailable in DX12 :(
+		printf("Tried to decode an unsupported index-buffer format on D3D12; format index: %i\n", (uint8_t)fmt);
+		return DXGI_FORMAT_R16_SINT; // Relatively safe default format
 	};
 }
 
 // See: https://docs.microsoft.com/en-us/windows/win32/direct3d12/creating-a-root-signature
 // ("code for defining a version 1.1 root signature")
-DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindList bindList, bool mayUseGraphics, uint32_t pipelineID)
+DXWrapper::BindingMetadata DXWrapper::ResolveRootSignature(ResourceBindList bindList, bool mayUseGraphics, uint32_t pipelineID)
 {
 	// Prepare descriptor handles/pointers
 	const uint64_t descriptorHandleIncrement = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -690,32 +718,31 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 		numResourcesBinding++;
 	}
 
-	const uint32_t numSRVs = bindList.numReadOnlyTextures + (bindList.tlasEnabled ? 1 : 0);
-	if (numSRVs > 0)
+	if (bindList.tlasEnabled)
 	{
-		if (bindList.tlasEnabled)
-		{
-			numResourcesBinding++;
-		}
-
-		numResourcesBinding += bindList.numReadOnlyTextures;
+		numResourcesBinding++;
 	}
 
-	const uint32_t numUAVs = bindList.numStructbuffers + bindList.numRWTextures;
-	if (numUAVs > 0)
-	{
-		numResourcesBinding += bindList.numStructbuffers;
-		numResourcesBinding += bindList.numRWTextures;
-	}
+	numResourcesBinding += bindList.numReadOnlyTextures;
+	numResourcesBinding += bindList.numStructbuffers;
+	numResourcesBinding += bindList.numRWTextures;
 
 	// Iterate handles before generating descriptors/views
-	for (uint64_t i = 1; i < numResourcesBinding; i++) 
+	for (uint64_t i = 1; i < numResourcesBinding; i++)
 	{
 		cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart + i].ptr = cbv_uav_srvDescriptorPtrs[descriptorHeapPtrListStart].ptr + (i * descriptorHandleIncrement);
 	}
 
 	// Generate descriptors
 	///////////////////////
+
+	// Quite a bit of work here is basically wasted under bindless (no need for root descriptor tables), uncertain whether to throw it out
+	// probably will - just another thing to keep in mind for this project @.@, + have to remember not to make the backend/engine code *too* opinionated
+	// (i.e. don't mix app/core logic)
+
+	// Binding metadata
+	// Needed for exporting binding IDs back to pipelines
+	BindingMetadata metadata = {};
 
 	// Generate cbuffer descriptors
 
@@ -726,177 +753,112 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 		cbvDesc.BufferLocation = GetGPUAddress(bindList.cbuffer);
 		cbvDesc.SizeInBytes = GetCBufferStride(bindList.cbuffer);
 		device->CreateConstantBufferView(&cbvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
+
+		metadata.orderedUntypedResourceHandles[metadata.numResources] = bindList.cbuffer.index;
+		metadata.numResources++;
+
 		descriptorHeapPtrsFront++;
 	}
 
-	// Generate SRV descriptors
-	if (numSRVs > 0)
+	// Generate strictbuffer & texture descriptors, in the requested order
+	uint32_t rwTextureCounter = 0;
+	uint32_t structBufferCounter = 0;
+	uint32_t readOnlyTextureCounter = 0;
+	for (uint32_t dynamicResourceCounter = 0; dynamicResourceCounter < (bindList.numReadOnlyTextures + bindList.numRWTextures + bindList.numStructbuffers); dynamicResourceCounter++)
 	{
-		// Generate descriptors for acceleration structure sub-resources
-		////////////////////////////////////////////////////////////////
-
-		if (bindList.tlasEnabled)
+		if (bindList.dynamicResourceBindingOrder[dynamicResourceCounter] == ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::TEXTURE_RW)
 		{
-			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
-			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.RaytracingAccelerationStructure.Location = GetGPUAddress<D3D_ACCELSTRUCT_TLAS>(bindList.topLevelAS);
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.Format = textureFmts[bindList.rwTextures[rwTextureCounter].index];
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; // All textures are currently 2D, though that might change in the future
+			uavDesc.Texture2D.MipSlice = 0;
+			uavDesc.Texture2D.PlaneSlice = 0;
+			device->CreateUnorderedAccessView(resources[bindList.rwTextures[rwTextureCounter].index].resrc.Get(), nullptr, &uavDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
 
-			device->CreateShaderResourceView(resources[bindList.topLevelAS.index].resrc.Get(), &srvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
+			metadata.orderedUntypedResourceHandles[metadata.numResources] = bindList.rwTextures[rwTextureCounter].index;
+			metadata.numResources++;
+
 			descriptorHeapPtrsFront++;
+			rwTextureCounter++;
 		}
 
-		// Generate descriptors for read-only textures
-		for (uint32_t i = 0; i < bindList.numReadOnlyTextures; i++)
+		if (bindList.dynamicResourceBindingOrder[dynamicResourceCounter] == ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::STRUCTBUFFER)
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+			uavDesc.Buffer.FirstElement = 0;
+			uavDesc.Buffer.NumElements = structBufferData[bindList.structbuffers[structBufferCounter].index].eltCount;
+			uavDesc.Buffer.StructureByteStride = structBufferData[bindList.structbuffers[structBufferCounter].index].stride;
+			uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE; // No bytebuffers in DXRSandbox yet
+			uavDesc.Buffer.CounterOffsetInBytes = 0; // For now - make adjustable if/when we ever add support for counter resources
+
+			metadata.orderedUntypedResourceHandles[metadata.numResources] = bindList.structbuffers[structBufferCounter].index;
+			metadata.numResources++;
+
+			device->CreateUnorderedAccessView(resources[bindList.structbuffers[structBufferCounter].index].resrc.Get(), /* No support for append/consume buffers in DXRSandbox atm */ nullptr, &uavDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
+			descriptorHeapPtrsFront++;
+			structBufferCounter++;
+		}
+
+		if (bindList.dynamicResourceBindingOrder[dynamicResourceCounter] == ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::TEXTURE_SAMPLED)
 		{
 			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
-			srvDesc.Format = textureFmts[bindList.readOnlyTextures[i].index];
+			srvDesc.Format = textureFmts[bindList.readOnlyTextures[readOnlyTextureCounter].index];
 			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; // All textures are currently 2D, though that might change in the future
 			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 			srvDesc.Texture2D.MipLevels = 1;//RaytracingAccelerationStructure.Location = GetAccelStructureGPUAddress(bindList.accelStructures[i]);
 			srvDesc.Texture2D.MostDetailedMip = 0;
 			srvDesc.Texture2D.PlaneSlice = 0;
 			srvDesc.Texture2D.ResourceMinLODClamp = 0;
-			device->CreateShaderResourceView(resources[bindList.readOnlyTextures[i].index].resrc.Get(), &srvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
+			device->CreateShaderResourceView(resources[bindList.readOnlyTextures[readOnlyTextureCounter].index].resrc.Get(), &srvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
+
+			metadata.orderedUntypedResourceHandles[metadata.numResources] = bindList.readOnlyTextures[readOnlyTextureCounter].index;
+			metadata.numResources++;
 			descriptorHeapPtrsFront++;
+			readOnlyTextureCounter++;
 		}
 	}
 
-	// Generate UAV descriptors
-	if (numUAVs > 0)
+	// Generate descriptors for acceleration structure sub-resources
+	////////////////////////////////////////////////////////////////
+
+	if (bindList.tlasEnabled)
 	{
-		// Generate descriptors for structured buffers
-		for (uint32_t i = 0; i < bindList.numStructbuffers; i++)
-		{
-			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-			uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-			uavDesc.Buffer.FirstElement = 0;
-			uavDesc.Buffer.NumElements = structBufferData[bindList.structbuffers[i].index].eltCount;
-			uavDesc.Buffer.StructureByteStride = structBufferData[bindList.structbuffers[i].index].stride;
-			uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE; // No bytebuffers in DXRSandbox yet
-			uavDesc.Buffer.CounterOffsetInBytes = 0; // For now - make adjustable if/when we ever add support for counter resources
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.RaytracingAccelerationStructure.Location = GetGPUAddress<D3D_ACCELSTRUCT_TLAS>(bindList.topLevelAS);
 
-			device->CreateUnorderedAccessView(resources[bindList.structbuffers[i].index].resrc.Get(), /* No support for append/consume buffers in DXRSandbox atm */ nullptr, &uavDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
-			descriptorHeapPtrsFront++;
-		}
+		device->CreateShaderResourceView(resources[bindList.topLevelAS.index].resrc.Get(), &srvDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
 
-		// Generate descriptors for read/write textures
-		for (uint32_t i = 0; i < bindList.numRWTextures; i++)
-		{
-			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-			uavDesc.Format = textureFmts[bindList.rwTextures[i].index];
-			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D; // All textures are currently 2D, though that might change in the future
-			uavDesc.Texture2D.MipSlice = 0;
-			uavDesc.Texture2D.PlaneSlice = 0;
-			device->CreateUnorderedAccessView(resources[bindList.rwTextures[i].index].resrc.Get(), nullptr, &uavDesc, cbv_uav_srvDescriptorPtrs[descriptorHeapPtrsFront]);
-			descriptorHeapPtrsFront++;
-		}
+		metadata.orderedUntypedResourceHandles[metadata.numResources] = bindList.topLevelAS.index;
+		metadata.numResources++;
+
+		descriptorHeapPtrsFront++;
 	}
 
 	// Resolve root signature
 	/////////////////////////
 
-	// Resolve cbuffer range
-	D3D12_DESCRIPTOR_RANGE1 descRangeCBuffer;
-	if (bindList.cbufferEnabled)
-	{
-		descRangeCBuffer.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-		descRangeCBuffer.NumDescriptors = 1;
-		descRangeCBuffer.BaseShaderRegister = 0;
-		descRangeCBuffer.RegisterSpace = 0; // No reason to use this feature yet
-		descRangeCBuffer.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC; // Cbuffer values are locked & updated just before each frame, but not during execution
-		descRangeCBuffer.OffsetInDescriptorsFromTableStart = 0; // Cbuffers are always the first resource in each descriptor heap
-	}
-
-	// Resolve srv range
-	bool srvRange = false;
-	D3D12_DESCRIPTOR_RANGE1 descRangeSRV = {};
-	if (numSRVs > 0)
-	{
-		descRangeSRV.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-		descRangeSRV.NumDescriptors = numSRVs;
-		descRangeSRV.BaseShaderRegister = 0;
-		descRangeSRV.RegisterSpace = 0; // No reason to use this feature yet
-		descRangeSRV.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE; // Volatile because we assume almost all SRVs (definitely all SRVs initialized on the GPU in the zeroth frame) will be accessed on the GPU before being sampled/rendered
-		descRangeSRV.OffsetInDescriptorsFromTableStart = bindList.cbufferEnabled ? 1 : 0; // SRVs come in right after cbuffers, and each pipeline has at most one cbuffer
-		srvRange = true;
-	}
-
-	// Resolve uav range
-	bool uavRange = false;
-	D3D12_DESCRIPTOR_RANGE1 descRangeUAV = {};
-	if (bindList.numRWTextures > 0 || bindList.numStructbuffers > 0)
-	{
-		descRangeUAV.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-		descRangeUAV.NumDescriptors = numUAVs;
-		descRangeUAV.BaseShaderRegister = 0;
-		descRangeUAV.RegisterSpace = 0; // No reason to use this feature yet
-		descRangeUAV.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE; // UAV values are likely to change in each frame
-		descRangeUAV.OffsetInDescriptorsFromTableStart = bindList.cbufferEnabled && srvRange ? numSRVs + 1 :
-														 !srvRange && bindList.cbufferEnabled ? 1 :
-														 !bindList.cbufferEnabled && srvRange ? numSRVs :
-														 /*!bindList.cbufferEnabled && !srvRange ? 0 :*/ 0; // UAVs are last in the table after SRVs and cbuffers
-		uavRange = true;
-	}
-
-	// Pack cbv ranges into a contiguous array, then format the root signature itself
-	/////////////////////////////////////////////////////////////////////////////////
-
-	// Range packing
-	uint32_t numViewTypes = 0;
-	D3D12_DESCRIPTOR_RANGE1 cbvRanges[3] = {}; // Supports CBVs, SRVs, UAVs
-	if (bindList.cbufferEnabled)
-	{
-		cbvRanges[0] = descRangeCBuffer;
-		numViewTypes++;
-	}
-	if (bindList.tlasEnabled || bindList.numReadOnlyTextures > 0) // We have SRVs
-	{
-		if (bindList.cbufferEnabled)
-		{
-			cbvRanges[1] = descRangeSRV;
-		}
-		else
-		{
-			cbvRanges[0] = descRangeSRV;
-		}
-		numViewTypes++;
-	}
-	if (bindList.numRWTextures > 0 || bindList.numStructbuffers > 0) // We have UAVs
-	{
-		if (bindList.cbufferEnabled && srvRange)
-		{
-			cbvRanges[2] = descRangeUAV;
-		}
-		else if (srvRange || bindList.cbufferEnabled)
-		{
-			cbvRanges[1] = descRangeUAV;
-		}
-		else
-		{
-			cbvRanges[0] = descRangeUAV;
-		}
-		numViewTypes++;
-	}
-
-	// Resolve root parameters (just one atm, no reason to use root constants or single-descriptor parameters yet)
-	D3D12_ROOT_PARAMETER1 rootParam;
-	rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-	rootParam.DescriptorTable.NumDescriptorRanges = numViewTypes;
-	rootParam.DescriptorTable.pDescriptorRanges = cbvRanges; // Cbuffers always land in b0
-	rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL; // Cbuffers always visible everywhere (tbh thinking of making everything visible everywhere for simplicity/consistency)
+	// Resolve root parameters
+	D3D12_ROOT_PARAMETER1 rootParams[1] = {};
+	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+	rootParams[0].Constants.Num32BitValues = XPlatConstants::maxNumRootConstants;
+	rootParams[0].Constants.RegisterSpace = 0; // Not quite certain about these
+	rootParams[0].Constants.ShaderRegister = 0;
 
 	// Set-up root signature description
 	D3D12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc = {};
 	rootSigDesc.Desc_1_1.NumParameters = 1;
-	rootSigDesc.Desc_1_1.pParameters = &rootParam;
+	rootSigDesc.Desc_1_1.pParameters = rootParams;
 	rootSigDesc.Desc_1_1.NumStaticSamplers = bindList.staticSamplersEnabled[0] && bindList.staticSamplersEnabled[1] ? 2 :
-											 bindList.staticSamplersEnabled[0] || bindList.staticSamplersEnabled[1] ? 1 :
-											 /*!bindList.pointSamplerEnabled && !bindList.linearSamplerEnabled ? :*/ 0;
+		bindList.staticSamplersEnabled[0] || bindList.staticSamplersEnabled[1] ? 1 :
+		/*!bindList.pointSamplerEnabled && !bindList.linearSamplerEnabled ? :*/ 0;
 	rootSigDesc.Desc_1_1.pStaticSamplers = (rootSigDesc.Desc_1_1.NumStaticSamplers == 0) ? nullptr : staticSamplers;
-	rootSigDesc.Desc_1_1.Flags = mayUseGraphics ? D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT : D3D12_ROOT_SIGNATURE_FLAG_NONE; // Possible future options are CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED, SAMPLER_HEAP_DIRECTLY_INDEXED, and LOCAL_ROOT_SIGNATURE
+	rootSigDesc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+	rootSigDesc.Desc_1_1.Flags = mayUseGraphics ? rootSigDesc.Desc_1_1.Flags | D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT : rootSigDesc.Desc_1_1.Flags;
 	rootSigDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
 
 	// Create root signature
@@ -915,7 +877,8 @@ DXWrapper::DataHandle<D3D_ROOTSIG> DXWrapper::ResolveRootSignature(ResourceBindL
 	// Return handle
 	DataHandle<D3D_ROOTSIG> rootsig;
 	rootsig.index = pipelineID;
-	return rootsig;
+	metadata.rootsig = rootsig;
+	return metadata;
 }
 
 DXWrapper::DataHandle<D3D_RASTER_INPUT_LAYOUT> DXWrapper::ResolveInputLayout(StandardResrcFmts* elementFormats, VertexEltSemantics* semantics, uint32_t numEltsPerVert)
@@ -939,9 +902,9 @@ DXWrapper::DataHandle<D3D_RASTER_INPUT_LAYOUT> DXWrapper::ResolveInputLayout(Sta
 	for (uint32_t i = 0; i < numEltsPerVert; i++)
 	{
 		elts[i].SemanticName = semantics[i] == VertexEltSemantics::POSITION ? "POSITION" :
-							   semantics[i] == VertexEltSemantics::COLOR ? "COLOR" :
-							   semantics[i] == VertexEltSemantics::NORMAL ? "NORMAL" :
-							   /*semantics[i] == VertexEltSemantics::TEXCOORD ? */ "TEXCOORD";
+			semantics[i] == VertexEltSemantics::COLOR ? "COLOR" :
+			semantics[i] == VertexEltSemantics::NORMAL ? "NORMAL" :
+			/*semantics[i] == VertexEltSemantics::TEXCOORD ? */ "TEXCOORD";
 		elts[i].SemanticIndex = semanticIndicesPerElt[i];
 		elts[i].Format = DecodeSandboxStdFormats(elementFormats[i]);
 		elts[i].InputSlot = 0; // Never more than one input-assembler in DXRSandbox
@@ -997,29 +960,27 @@ D3D12_RESOURCE_STATES decodeVariantToState(ResourceViews variant)
 {
 	switch (variant)
 	{
-		case ResourceViews::VBUFFER:
-			return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-		case ResourceViews::STRUCTBUFFER_RW:
-			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-		case ResourceViews::IBUFFER:
-			return D3D12_RESOURCE_STATE_INDEX_BUFFER;
-		case ResourceViews::CBUFFER:
-			return D3D12_RESOURCE_STATE_GENERIC_READ;
-		case ResourceViews::TEXTURE_DIRECT_WRITE:
-			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-		case ResourceViews::TEXTURE_SUPPORTS_SAMPLING:
-			return D3D12_RESOURCE_STATE_GENERIC_READ;
-		case ResourceViews::TEXTURE_STAGING:
-			assert(false); // Staging resources can't be accessed on the gpu at all, so should never be transitioned to other resource states
-		case ResourceViews::TEXTURE_RENDER_TARGET:
-			return D3D12_RESOURCE_STATE_RENDER_TARGET;
-		case ResourceViews::TEXTURE_DEPTH_STENCIL:
-			return D3D12_RESOURCE_STATE_DEPTH_WRITE; // Tough, could justify DEPTH_WRITE or DEPTH_READ depending on context
-		case ResourceViews::RT_ACCEL_STRUCTURE:
-			return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
-		default:
-			assert(false); // Unimplemented resource view
-			return D3D12_RESOURCE_STATE_COMMON;
+	case ResourceViews::VBUFFER:
+		return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+	case ResourceViews::STRUCTBUFFER_RW:
+		return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	case ResourceViews::IBUFFER:
+		return D3D12_RESOURCE_STATE_INDEX_BUFFER;
+	case ResourceViews::CBUFFER:
+		return D3D12_RESOURCE_STATE_GENERIC_READ;
+	case ResourceViews::TEXTURE_DIRECT_WRITE:
+		return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	case ResourceViews::TEXTURE_SUPPORTS_SAMPLING:
+		return D3D12_RESOURCE_STATE_GENERIC_READ;
+	case ResourceViews::TEXTURE_RENDER_TARGET:
+		return D3D12_RESOURCE_STATE_RENDER_TARGET;
+	case ResourceViews::TEXTURE_DEPTH_STENCIL:
+		return D3D12_RESOURCE_STATE_DEPTH_WRITE; // Tough, could justify DEPTH_WRITE or DEPTH_READ depending on context
+	case ResourceViews::RT_ACCEL_STRUCTURE:
+		return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+	default:
+		assert(false); // Unimplemented resource view
+		return D3D12_RESOURCE_STATE_COMMON;
 	}
 }
 
@@ -1074,7 +1035,7 @@ void DXWrapper::InsertTransition(ResourceViews beforeVariant, ResourceViews afte
 	}
 	else if (afterVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING)
 	{
-		// No explicit descriptor setings here, I think...
+		// No explicit descriptor settings here, I think...
 	}
 	else if (afterVariant == ResourceViews::TEXTURE_DEPTH_STENCIL)
 	{
@@ -1085,7 +1046,7 @@ void DXWrapper::InsertTransition(ResourceViews beforeVariant, ResourceViews afte
 		dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
 		dsvDesc.Texture2D.MipSlice = 0; // Not using mip-slices atm
 		dsvDesc.Flags = D3D12_DSV_FLAG_NONE; // No need to mask off depth/stencil yet; avoiding managing that complexity for now
-		
+
 		// No reason to re-allocate DSV if one is already defined for the current pipeline
 		// (we don't support multiple depth-stencils per-pipeline)
 		if (dsvDescriptorPtrs[pipelineID].ptr != NULL)
@@ -1116,7 +1077,7 @@ void DXWrapper::UpdateCBufferData(DataHandle<D3D_CBUFFER> handle, CPUMemory::Byt
 	D3D12_RANGE writeRange;
 	writeRange.Begin = 0;
 	writeRange.End = static_cast<SIZE_T>(srcLength);
-	
+
 	resources[handle.index].resrc->Map(0, &readRange, &copyDst);
 	memcpy(copyDst, srcAddr, srcLength);
 	resources[handle.index].resrc->Unmap(0, &writeRange); // Not sure about scheduling these hmmmm - might want to queue between frames
@@ -1143,7 +1104,7 @@ struct LoadedShaderBytecode
 
 		length = pathSize;
 	}
-	
+
 	~LoadedShaderBytecode()
 	{
 		// Clear temporary memory
@@ -1184,25 +1145,25 @@ D3D12_COMPARISON_FUNC decodeDepthStencilComparisons(RasterSettings::DEPTH_STENCI
 {
 	switch (test)
 	{
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::ALWAYS:
-			return D3D12_COMPARISON_FUNC_ALWAYS;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::EQUAL:
-			return D3D12_COMPARISON_FUNC_EQUAL;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::GREATER:
-			return D3D12_COMPARISON_FUNC_GREATER;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::GREATER_OR_EQUAL:
-			return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::LESS:
-			return D3D12_COMPARISON_FUNC_LESS;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::LESS_OR_EQUAL:
-			return D3D12_COMPARISON_FUNC_LESS_EQUAL;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::NEVER:
-			return D3D12_COMPARISON_FUNC_NEVER;
-		case RasterSettings::DEPTH_STENCIL_TEST_TYPES::NOT_EQUAL:
-			return D3D12_COMPARISON_FUNC_NOT_EQUAL;
-		default:
-			assert(false); // Something went weirdly wrong, unsupported test type
-			return D3D12_COMPARISON_FUNC_NEVER; // Fallback/debug depth/stencil type
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::ALWAYS:
+		return D3D12_COMPARISON_FUNC_ALWAYS;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::EQUAL:
+		return D3D12_COMPARISON_FUNC_EQUAL;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::GREATER:
+		return D3D12_COMPARISON_FUNC_GREATER;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::GREATER_OR_EQUAL:
+		return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::LESS:
+		return D3D12_COMPARISON_FUNC_LESS;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::LESS_OR_EQUAL:
+		return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::NEVER:
+		return D3D12_COMPARISON_FUNC_NEVER;
+	case RasterSettings::DEPTH_STENCIL_TEST_TYPES::NOT_EQUAL:
+		return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+	default:
+		assert(false); // Something went weirdly wrong, unsupported test type
+		return D3D12_COMPARISON_FUNC_NEVER; // Fallback/debug depth/stencil type
 	}
 }
 
@@ -1210,23 +1171,23 @@ D3D12_STENCIL_OP decodeStencilOp(RasterSettings::STENCIL_OP_TYPES op)
 {
 	switch (op)
 	{
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_KEEP:
-			return D3D12_STENCIL_OP_KEEP;
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_ZERO:
-			return D3D12_STENCIL_OP_ZERO;
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_INCREMENT_CLAMPED:
-			return D3D12_STENCIL_OP_INCR_SAT;
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_DECREMENT_CLAMPED:
-			return D3D12_STENCIL_OP_DECR_SAT;
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_INVERT:
-			return D3D12_STENCIL_OP_INVERT;
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_INCREMENT_WRAPPED:
-			return D3D12_STENCIL_OP_INCR;
-		case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_DECREMENT_WRAPPED:
-			return D3D12_STENCIL_OP_DECR;
-		default:
-			assert(false); // Something went weirdly wrong, unsupported stencil operation
-			return D3D12_STENCIL_OP_ZERO; // Fallback/debug setting
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_KEEP:
+		return D3D12_STENCIL_OP_KEEP;
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_ZERO:
+		return D3D12_STENCIL_OP_ZERO;
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_INCREMENT_CLAMPED:
+		return D3D12_STENCIL_OP_INCR_SAT;
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_DECREMENT_CLAMPED:
+		return D3D12_STENCIL_OP_DECR_SAT;
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_INVERT:
+		return D3D12_STENCIL_OP_INVERT;
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_INCREMENT_WRAPPED:
+		return D3D12_STENCIL_OP_INCR;
+	case RasterSettings::STENCIL_OP_TYPES::STENCIL_OP_DECREMENT_WRAPPED:
+		return D3D12_STENCIL_OP_DECR;
+	default:
+		assert(false); // Something went weirdly wrong, unsupported stencil operation
+		return D3D12_STENCIL_OP_ZERO; // Fallback/debug setting
 	}
 }
 
@@ -1234,46 +1195,46 @@ uint32_t getTextureFormatSize(DXGI_FORMAT fmt)
 {
 	switch (fmt)
 	{
-		case DXGI_FORMAT_R8_UINT:
-			return 1;
+	case DXGI_FORMAT_R8_UINT:
+		return 1;
 
-		case DXGI_FORMAT_R16_UINT:
-		case DXGI_FORMAT_R16_SINT:
-		case DXGI_FORMAT_R16_FLOAT:
-		case DXGI_FORMAT_D16_UNORM:
-		case DXGI_FORMAT_R8G8_UINT:
-			return 2;
+	case DXGI_FORMAT_R16_UINT:
+	case DXGI_FORMAT_R16_SINT:
+	case DXGI_FORMAT_R16_FLOAT:
+	case DXGI_FORMAT_D16_UNORM:
+	case DXGI_FORMAT_R8G8_UINT:
+		return 2;
 
-		case DXGI_FORMAT_D24_UNORM_S8_UINT:
-		case DXGI_FORMAT_D32_FLOAT:
-		case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
-		case DXGI_FORMAT_R32_UINT:
-		case DXGI_FORMAT_R32_SINT:
-		case DXGI_FORMAT_R32_FLOAT:
-		case DXGI_FORMAT_R16G16_FLOAT:
-		case DXGI_FORMAT_R16G16_UINT:
-		case DXGI_FORMAT_R8G8B8A8_UINT:
-		case DXGI_FORMAT_R8G8B8A8_SINT:
-			return 4;
+	case DXGI_FORMAT_D24_UNORM_S8_UINT:
+	case DXGI_FORMAT_D32_FLOAT:
+	case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+	case DXGI_FORMAT_R32_UINT:
+	case DXGI_FORMAT_R32_SINT:
+	case DXGI_FORMAT_R32_FLOAT:
+	case DXGI_FORMAT_R16G16_FLOAT:
+	case DXGI_FORMAT_R16G16_UINT:
+	case DXGI_FORMAT_R8G8B8A8_UINT:
+	case DXGI_FORMAT_R8G8B8A8_SINT:
+		return 4;
 
-		case DXGI_FORMAT_R32G32_FLOAT:
-		case DXGI_FORMAT_R16G16B16A16_FLOAT:
-		case DXGI_FORMAT_R16G16B16A16_UINT:
-		case DXGI_FORMAT_R32G32_UINT:
-		case DXGI_FORMAT_R32G32_SINT:
-			return 8;
+	case DXGI_FORMAT_R32G32_FLOAT:
+	case DXGI_FORMAT_R16G16B16A16_FLOAT:
+	case DXGI_FORMAT_R16G16B16A16_UINT:
+	case DXGI_FORMAT_R32G32_UINT:
+	case DXGI_FORMAT_R32G32_SINT:
+		return 8;
 
-		case DXGI_FORMAT_R32G32B32_SINT:
-		case DXGI_FORMAT_R32G32B32_UINT:
-			return 12;
+	case DXGI_FORMAT_R32G32B32_SINT:
+	case DXGI_FORMAT_R32G32B32_UINT:
+		return 12;
 
-		case DXGI_FORMAT_R32G32B32A32_UINT:
-		case DXGI_FORMAT_R32G32B32A32_SINT:
-			return 16;
+	case DXGI_FORMAT_R32G32B32A32_UINT:
+	case DXGI_FORMAT_R32G32B32A32_SINT:
+		return 16;
 
-		default:
-			assert(false); // Either not a valid texture format (e.g. DXGI_FORMAT_UNKNOWN), or a format not yet supported by StandardResrcFmts, StandardIBufferFmts, or StandardDepthStencilFormats
-			return 0;
+	default:
+		assert(false); // Either not a valid texture format (e.g. DXGI_FORMAT_UNKNOWN), or a format not yet supported by StandardResrcFmts, StandardIBufferFmts, or StandardDepthStencilFormats
+		return 0;
 	}
 }
 
@@ -1329,7 +1290,7 @@ DXWrapper::DataHandle<D3D_PSO> DXWrapper::GenerateGraphicsPSO(const char* precom
 		// Raster blending disabled for now, given DXR features (might be enabled for future experiments)
 		psoDesc.BlendState.AlphaToCoverageEnable = false;
 		psoDesc.BlendState.IndependentBlendEnable = false;
-		
+
 		for (uint32_t i = 0; i < XPlatConstants::maxNumRenderTargetsPerPipeline(); i++)
 		{
 			psoDesc.BlendState.RenderTarget[i].BlendEnable = false;
@@ -1570,32 +1531,32 @@ ComPtr<ID3D12Resource> AllocASResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_
 	switch (asAllocSettings)
 	{
 		// Temporary placed resource (placed into tmpResrcPool)
-		case AS_ALLOC_OPTIONS::SCRATCH:
-		{
-			device->CreatePlacedResource(resourceHeaps[GPU_ONLY_HEAP].Get(), heapOffsets[GPU_ONLY_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&tmpResrcPool[numTmpResources]));
-			return tmpResrcPool[numTmpResources];
-		}
+	case AS_ALLOC_OPTIONS::SCRATCH:
+	{
+		device->CreatePlacedResource(resourceHeaps[GPU_ONLY_HEAP].Get(), heapOffsets[GPU_ONLY_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&tmpResrcPool[numTmpResources]));
+		return tmpResrcPool[numTmpResources];
+	}
 
-		// Regular placed default resources ^_^
-		case AS_ALLOC_OPTIONS::BLAS:
-		{
-			device->CreatePlacedResource(resourceHeaps[UPLOAD_HEAP].Get(), heapOffsets[UPLOAD_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&resources[resrcOffset].resrc));
-			return resources[resrcOffset].resrc;
-		}
-		case AS_ALLOC_OPTIONS::TLAS:
-		{
-			device->CreatePlacedResource(resourceHeaps[UPLOAD_HEAP].Get(), heapOffsets[UPLOAD_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&resources[resrcOffset + 1].resrc)); // TLASes are always allocated adjacent to BLASes
-			return resources[resrcOffset + 1].resrc;
-		}
+	// Regular placed default resources ^_^
+	case AS_ALLOC_OPTIONS::BLAS:
+	{
+		device->CreatePlacedResource(resourceHeaps[UPLOAD_HEAP].Get(), heapOffsets[UPLOAD_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&resources[resrcOffset].resrc));
+		return resources[resrcOffset].resrc;
+	}
+	case AS_ALLOC_OPTIONS::TLAS:
+	{
+		device->CreatePlacedResource(resourceHeaps[UPLOAD_HEAP].Get(), heapOffsets[UPLOAD_HEAP], &desc, initState, clearVal, IID_PPV_ARGS(&resources[resrcOffset + 1].resrc)); // TLASes are always allocated adjacent to BLASes
+		return resources[resrcOffset + 1].resrc;
+	}
 
-		// Shouldn't be reachable, something very borky if we get here
-		default:
-		{
-			assert(false);
-			DebugBreak();
-			return resources[resrcOffset].resrc; // Garbage return value
-			break;
-		}
+	// Shouldn't be reachable, something very borky if we get here
+	default:
+	{
+		assert(false);
+		DebugBreak();
+		return resources[resrcOffset].resrc; // Garbage return value
+		break;
+	}
 	}
 }
 
@@ -1631,8 +1592,7 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 		// Generate, schedule copy to GPU, then move to the next temp resource (if non-null source data & not a constant buffer)
 		if (!cbuffer)
 		{
-			// Branching these to handle the following:
-			// D3D12 ERROR: ID3D12Device::CreatePlacedResource: A texture resource cannot be created on a D3D12_HEAP_TYPE_UPLOAD or D3D12_HEAP_TYPE_READBACK heap. Investigate CopyTextureRegion to copy texture data in CPU accessible buffers, or investigate D3D12_HEAP_TYPE_CUSTOM and WriteToSubresource for UMA adapter optimizations. [ STATE_CREATION ERROR #638: CREATERESOURCEANDHEAP_INVALIDHEAPPROPERTIES]
+			const uint32_t numUploads = numBufferUploadEvents + numTextureUploadEvents;
 			if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
 			{
 				// Create linear buffer on staging heap
@@ -1682,7 +1642,10 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 				srcBox.right = static_cast<UINT>(desc.Width);
 
 				// Copy record
-				bgCmdList->CopyTextureRegion(&copyDest, 0, 0, 0, &copySrc, &srcBox);
+				textureUploadEvents[numTextureUploadEvents].copyDest = copyDest;
+				textureUploadEvents[numTextureUploadEvents].copySrc = copySrc;
+				textureUploadEvents[numTextureUploadEvents].srcBox = srcBox;
+				numTextureUploadEvents++;
 			}
 			else if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
 			{
@@ -1706,8 +1669,10 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 				assert(success == S_OK);
 
 				// Copy from upload to download
-				bgCmdList->CopyBufferRegion(resources[resrcOffset].resrc.Get(), 0, tmpResrcPool[numTmpResources].Get(), 0, resrcFootprint);
-				//bgCmdList->CopyResource(resources[resrcOffset].resrc.Get(), tmpResrcPool[numTmpResources].Get());
+				bufferUploadEvents[numBufferUploadEvents].dstResrc = resources[resrcOffset].resrc.Get();
+				bufferUploadEvents[numBufferUploadEvents].srcResrc = tmpResrcPool[numTmpResources].Get();
+				bufferUploadEvents[numBufferUploadEvents].resrcFootprint = resrcFootprint;
+				numBufferUploadEvents++;
 			}
 
 			// Transition the GPU resource back to its correct initial-state
@@ -1718,7 +1683,7 @@ void PlaceResource(D3D12_RESOURCE_DESC desc, D3D12_RESOURCE_STATES initState, D3
 			barrier.Transition.Subresource = 0;
 			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE::D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 			barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-			bgCmdList->ResourceBarrier(1, &barrier);
+			uploadBarriers[numUploads] = barrier;
 
 			// Increment heap offsets
 			const uint64_t alignedFootprint = AlignResrcFootprint(resrcFootprint, desc.Alignment);
@@ -1795,7 +1760,7 @@ D3D12_RESOURCE_FLAGS DecodeTextureAccessPermissions(GPUResrcPermSetTextures perm
 		{
 			flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 		}
-		
+
 		if (depthStencilAccess)
 		{
 			flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
@@ -1805,7 +1770,7 @@ D3D12_RESOURCE_FLAGS DecodeTextureAccessPermissions(GPUResrcPermSetTextures perm
 				flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
 			}
 		}
-		
+
 		return flags;
 	}
 	else
@@ -1895,10 +1860,6 @@ DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateStandardTexture(uint32_t w
 	{
 		assert(("Sampled resource rquested without read permissions", accessSettings & GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_DIRECT_READS));
 	}
-	else if (textureVariant == TextureViews::STAGING)
-	{
-		assert(("Only copies supported for staging resources", accessSettings == GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_COPIES_ONLY));
-	}
 	else if (textureVariant == TextureViews::RENDER_TARGET)
 	{
 		assert(("Render-target resource requested without render-target permissions", accessSettings == GPU_RESRC_ACCESS_PERMISSIONS_TEXTURES::TEXTURE_ACCESS_AS_RENDER_TARGET));
@@ -1929,17 +1890,16 @@ DXWrapper::DataHandle<D3D_TEXTURE> DXWrapper::GenerateStandardTexture(uint32_t w
 	// General state calculations, appropriate for depth/stencil, SRV, UAV, and render-target textures
 	// Staging textures can't be accessed directly from CPU or GPU, so their only valid initial state is copy-dest
 	D3D12_RESOURCE_STATES initState = textureVariant == TextureViews::DIRECT_WRITE ? D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_UNORDERED_ACCESS :
-									  textureVariant == TextureViews::SUPPORTS_SAMPLING ? D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE :
-									  textureVariant == TextureViews::RENDER_TARGET ? D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_RENDER_TARGET :
-									  /*textureVariant == TextureVariants::TEXTURE_STAGING ? */ D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_COPY_DEST;
+		textureVariant == TextureViews::SUPPORTS_SAMPLING ? D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE :
+		/*textureVariant == TextureViews::RENDER_TARGET ? */D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_RENDER_TARGET;
 
 	// Create resource
 	const uint32_t resrcOffset = (pipelineID * XPlatConstants::maxResourcesPerPipeline) + numResources[pipelineID];
 	PlaceResource(resrcDesc, initState, nullptr, footprint, false, srcData, resrcOffset);
 	resources[resrcOffset].curr_variant = textureVariant == TextureViews::DIRECT_WRITE ? ResourceViews::TEXTURE_DIRECT_WRITE :
-										   textureVariant == TextureViews::SUPPORTS_SAMPLING ? ResourceViews::TEXTURE_SUPPORTS_SAMPLING :
-										   textureVariant == TextureViews::RENDER_TARGET ? ResourceViews::TEXTURE_RENDER_TARGET :
-						        		   /*textureVariant == TextureVariants::TEXTURE_STAGING ? */ ResourceViews::TEXTURE_STAGING;
+		textureVariant == TextureViews::SUPPORTS_SAMPLING ? ResourceViews::TEXTURE_SUPPORTS_SAMPLING :
+		/*textureVariant == TextureViews::RENDER_TARGET ? */ResourceViews::TEXTURE_RENDER_TARGET;
+
 	resources[resrcOffset].is_variant_supported[(uint32_t)resources[resrcOffset].curr_variant] = true;
 	textureFmts[resrcOffset] = resrcDesc.Format;
 
@@ -2092,10 +2052,10 @@ void DXWrapper::GenerateAccelStructForGeometry(DataHandle<D3D_VBUFFER> vbufHandl
 	// Supported vbuffer/ibuffer formats found here (assumes target devices support raytracing tier 1.1):
 	// https://docs.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_raytracing_geometry_triangles_desc
 	DXGI_FORMAT vbufFmt = vbufferEltFmtsPerVert[vbufHandle.index].fmts[0];
-	assert(vbufFmt == DXGI_FORMAT_R32G32_FLOAT      || vbufFmt == DXGI_FORMAT_R32G32B32_FLOAT    || vbufFmt == DXGI_FORMAT_R16G16_FLOAT		  || vbufFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ||
-		   vbufFmt == DXGI_FORMAT_R16G16_SNORM      || vbufFmt == DXGI_FORMAT_R16G16B16A16_SNORM || vbufFmt == DXGI_FORMAT_R16G16B16A16_UNORM || vbufFmt == DXGI_FORMAT_R16G16_UNORM	   ||
-		   vbufFmt == DXGI_FORMAT_R10G10B10A2_UNORM || vbufFmt == DXGI_FORMAT_R8G8B8A8_UNORM     || vbufFmt == DXGI_FORMAT_R8G8_UNORM		  || vbufFmt == DXGI_FORMAT_R8G8B8A8_SNORM	   ||
-		   vbufFmt == DXGI_FORMAT_R8G8_SNORM);
+	assert(vbufFmt == DXGI_FORMAT_R32G32_FLOAT || vbufFmt == DXGI_FORMAT_R32G32B32_FLOAT || vbufFmt == DXGI_FORMAT_R16G16_FLOAT || vbufFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+		vbufFmt == DXGI_FORMAT_R16G16_SNORM || vbufFmt == DXGI_FORMAT_R16G16B16A16_SNORM || vbufFmt == DXGI_FORMAT_R16G16B16A16_UNORM || vbufFmt == DXGI_FORMAT_R16G16_UNORM ||
+		vbufFmt == DXGI_FORMAT_R10G10B10A2_UNORM || vbufFmt == DXGI_FORMAT_R8G8B8A8_UNORM || vbufFmt == DXGI_FORMAT_R8G8_UNORM || vbufFmt == DXGI_FORMAT_R8G8B8A8_SNORM ||
+		vbufFmt == DXGI_FORMAT_R8G8_SNORM);
 
 	const bool ibufSet = ibufHandle != nullptr;
 	DXGI_FORMAT ibufFmt = DXGI_FORMAT_UNKNOWN;
@@ -2122,9 +2082,9 @@ void DXWrapper::GenerateAccelStructForGeometry(DataHandle<D3D_VBUFFER> vbufHandl
 
 	// Resolve build flags
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS buildFlags = (asConfig.minimal_footprint ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_MINIMIZE_MEMORY : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE) |
-																	 (asConfig.updatable ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE) |
-																     (asConfig.perfPriority == XPlatUtils::AccelStructConfig::AS_PERF_PRIORITY::FAST_BUILD ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD :
-																																							 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE);
+		(asConfig.updatable ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE) |
+		(asConfig.perfPriority == XPlatUtils::AccelStructConfig::AS_PERF_PRIORITY::FAST_BUILD ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD :
+			D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE);
 
 	// Describe top/bottom level AS inputs
 	//////////////////////////////////////
@@ -2220,11 +2180,11 @@ DXWrapper::DataHandle<D3D_CMD_LIST> DXWrapper::CreateCmdList(wchar_t* label)
 		// Create a command list in the next available slot
 		device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(cmdAllocators[numCmdLists]), (void**)&cmdAllocators[numCmdLists]);
 		device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAllocators[numCmdLists].Get(), nullptr, __uuidof(cmdLists[numCmdLists]), (void**)&cmdLists[numCmdLists]);
-		
+
 		cmdLists[numCmdLists]->Close();
 		cmdLists[numCmdLists]->Reset(cmdAllocators[numCmdLists].Get(), nullptr);
 		cmdLists[numCmdLists]->SetName(label);
-		
+
 		cmdListsOpen[numCmdLists] = true;
 	}
 	else
@@ -2239,33 +2199,29 @@ DXWrapper::DataHandle<D3D_CMD_LIST> DXWrapper::CreateCmdList(wchar_t* label)
 	return h;
 }
 
-void DXWrapper::BindComputeResources(DataHandle<D3D_CMD_LIST> pipe_work, DataHandle<D3D_ROOTSIG> rootSig, uint8_t pipelineID)
+void DXWrapper::BindComputeResources(DataHandle<D3D_CMD_LIST> pipe_work, DataHandle<D3D_ROOTSIG> rootSig, uint8_t pipelineID, uint32_t* rootConstants, uint32_t numRootConstants)
 {
 	const ComPtr<ID3D12GraphicsCommandList>& cmdList = cmdLists[pipe_work.index];
-	cmdList->SetComputeRootSignature(rootSigs[rootSig.index].Get());
-	
-	ID3D12DescriptorHeap* _descriptorHeaps[1] = { descriptorHeaps[pipelineID].genericResrcViews.Get() };//, descriptorHeaps[pipelineID].samplerViews.Get() };
-												  //descriptorHeaps[pipelineID].depthStencilViews.Get(), descriptorHeaps[pipelineID].renderTargetViews.Get() };
 
-	cmdList->SetDescriptorHeaps(1, _descriptorHeaps);
-	cmdList->SetComputeRootDescriptorTable(0, descriptorHeaps[pipelineID].genericResrcViews->GetGPUDescriptorHandleForHeapStart());
+	ID3D12DescriptorHeap* _descriptorHeaps[1] = { descriptorHeaps[pipelineID].genericResrcViews.Get() };
+	cmdList->SetDescriptorHeaps(1, _descriptorHeaps); // Must be bound before root-sig for dynamic resource support (only on compute for now)
+	cmdList->SetComputeRootSignature(rootSigs[rootSig.index].Get());
+	cmdList->SetComputeRoot32BitConstants(0, numRootConstants, rootConstants, 0);
 }
 
 bool dirtyBackBuffer = false;
-void DXWrapper::BindGFX_Resources(DataHandle<D3D_CMD_LIST> pipe_work, DataHandle<D3D_ROOTSIG> rootSig, uint8_t pipelineID)
+void DXWrapper::BindGFX_Resources(DataHandle<D3D_CMD_LIST> pipe_work, DataHandle<D3D_ROOTSIG> rootSig, uint8_t pipelineID, uint32_t* rootConstants, uint32_t numRootConstants)
 {
-	// Set GFX root signature
+	// Set GFX descriptors (CBV/SRV/UAV) & root signature
 	const ComPtr<ID3D12GraphicsCommandList>& cmdList = cmdLists[pipe_work.index];
-	cmdList->SetGraphicsRootSignature(rootSigs[rootSig.index].Get());
-
-	// Set GFX descriptors (CBV/SRV/UAV)
-	ID3D12DescriptorHeap* _descriptorHeaps[1] = { descriptorHeaps[pipelineID].genericResrcViews.Get(), 
-												  /* descriptorHeaps[pipelineID].samplerViews.Get(),
-												  descriptorHeaps[pipelineID].depthStencilViews.Get(), 
-												  descriptorHeaps[pipelineID].renderTargetViews.Get()*/ };
+	ID3D12DescriptorHeap* _descriptorHeaps[1] = { descriptorHeaps[pipelineID].genericResrcViews.Get(),
+		/* descriptorHeaps[pipelineID].samplerViews.Get(),
+		descriptorHeaps[pipelineID].depthStencilViews.Get(),
+		descriptorHeaps[pipelineID].renderTargetViews.Get()*/ };
 
 	cmdList->SetDescriptorHeaps(1, _descriptorHeaps);
-	cmdList->SetGraphicsRootDescriptorTable(0, descriptorHeaps[pipelineID].genericResrcViews->GetGPUDescriptorHandleForHeapStart());
+	cmdList->SetGraphicsRootSignature(rootSigs[rootSig.index].Get());
+	cmdList->SetGraphicsRoot32BitConstants(0, numRootConstants, rootConstants, 0);
 
 	// If drawing to the backbuffer, transition its resource to RENDER_TARGET before drawing/binding
 	const bool backBufferDraw = writesToBackBuffer[pipelineID];
@@ -2290,7 +2246,7 @@ void DXWrapper::BindGFX_Resources(DataHandle<D3D_CMD_LIST> pipe_work, DataHandle
 	// Bind render-target views & depth-stencil views to the output-merger stage
 	D3D12_CPU_DESCRIPTOR_HANDLE cpuRTV_Ptr = descriptorHeaps[pipelineID].renderTargetViews->GetCPUDescriptorHandleForHeapStart();
 	D3D12_CPU_DESCRIPTOR_HANDLE cpuDSV_Ptr = descriptorHeaps[pipelineID].depthStencilViews->GetCPUDescriptorHandleForHeapStart();
-	
+
 	if (backBufferDraw)
 	{
 		// We assume for simplicity that presentation/final BBuff draws only render to a single target
@@ -2331,7 +2287,7 @@ void DXWrapper::SubmitGraphicsExec(DataHandle<D3D_CMD_LIST> work, uint32_t numNd
 	cmdList->RSSetScissorRects(1, &scissor);
 	cmdList->IASetPrimitiveTopology(gfx_topologies[pso.index]);
 	cmdList->DrawIndexedInstanced(numNdces, 1, 0, 0, 0); // No instancing support - too hard, we lazy
-														 // (& software/simulated instancing could be faster, maybe)
+	// (& software/simulated instancing could be faster, maybe)
 }
 
 void DXWrapper::CloseCmdList(DataHandle<D3D_CMD_LIST> cmds)
@@ -2376,6 +2332,28 @@ static uint32_t numPipesIssued = 0;
 
 void DXWrapper::IssueWork(DataHandle<D3D_CMD_LIST> work, bool issueSynchronous, uint8_t pipelineID) // Suspect sequential ExecuteCommandLists(...) calls with different cmdlists are automatically synchronized - removing this flag eventually
 {
+	// Process deferred upload events, separately batching uploads & barriers to improve performance
+
+	for (uint32_t i = 0; i < numBufferUploadEvents; i++)
+	{
+		BufferUploadEvent event = bufferUploadEvents[i];
+		bgCmdList->CopyBufferRegion(event.dstResrc.Get(), 0, event.srcResrc.Get(), 0, event.resrcFootprint);
+	}
+
+	for (uint32_t i = 0; i < numTextureUploadEvents; i++)
+	{
+		TextureUploadEvent event = textureUploadEvents[i];
+		bgCmdList->CopyTextureRegion(&event.copyDest, 0, 0, 0, &event.copySrc, &event.srcBox);
+	}
+
+	const uint32_t numUploadBarriers = numBufferUploadEvents + numTextureUploadEvents;
+	if (numUploadBarriers > 0)
+	{
+		bgCmdList->ResourceBarrier(numBufferUploadEvents + numTextureUploadEvents, uploadBarriers);
+		numBufferUploadEvents = 0;
+		numTextureUploadEvents = 0;
+	}
+
 	// Clear uninitialized depth-stencils/render-targets before submitting GPU work
 	for (uint32_t i = 0; i < XPlatConstants::maxResourcesPerPipeline; i++)
 	{
@@ -2455,7 +2433,7 @@ void DXWrapper::PresentLastFrame()
 
 	swapChain->Present(1, 0);
 	currBackBuffer = (currBackBuffer + 1) % XPlatConstants::numBackBuffers;
-	
+
 	bgCmdList->Close();
 	bgCmdAlloc->Reset();
 	bgCmdList->Reset(bgCmdAlloc.Get(), nullptr);

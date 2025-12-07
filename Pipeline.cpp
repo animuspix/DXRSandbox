@@ -10,19 +10,29 @@ struct PipelineObjectBundle
 	// Resources & composed root signature
 	// Descriptor heaps can theoretically be filled by just one resource type (like 32 structbuffers), so size each registry to the total resource count (maxResourcesPerPipeline)
 	GPUResource<ResourceViews::CBUFFER> cbuffer;
+	uint32_t cbufferBindingIndex;
 	bool cbufferRegistered = false;
 
 	GPUResource<ResourceViews::STRUCTBUFFER_RW> structbuffers[XPlatConstants::maxResourcesPerPipeline];
+	uint32_t structbufferBindingIndices[XPlatConstants::maxResourcesPerPipeline];
 	uint32_t numStructBuffers = 0;
 
 	GPUResource<ResourceViews::TEXTURE_SUPPORTS_SAMPLING> texturesReadOnly[XPlatConstants::maxResourcesPerPipeline];
+	uint32_t readOnlyTextureBindingIndices[XPlatConstants::maxResourcesPerPipeline];
 	uint32_t numTexturesReadOnly = 0;
 
 	GPUResource<ResourceViews::TEXTURE_DIRECT_WRITE> texturesRW[XPlatConstants::maxResourcesPerPipeline];
+	uint32_t rwTextureBindingIndices[XPlatConstants::maxResourcesPerPipeline];
 	uint32_t numTexturesRW = 0;
 
-	GPUResource<ResourceViews::TEXTURE_STAGING> texturesStaging[XPlatConstants::maxResourcesPerPipeline];
-	uint32_t numTexturesStaging = 0;
+private:
+	DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS dynamicResourceBindingOrder[XPlatConstants::maxResourcesPerPipeline];
+public:
+	void CopyBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS* dest) { memcpy(dest, dynamicResourceBindingOrder, sizeof(dynamicResourceBindingOrder)); }
+	void UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS bindType)
+	{
+		dynamicResourceBindingOrder[numStructBuffers + numTexturesReadOnly + numTexturesRW] = bindType;
+	}
 
 	// At most one vbuffer & one ibuffer per-pipeline
 	// Encourages geometry batching & grouping similar types of processing together, which should be good for performance
@@ -36,6 +46,7 @@ struct PipelineObjectBundle
 	bool resolvedIlayout = false;
 
 	GPUResource<ResourceViews::RT_ACCEL_STRUCTURE> pipelineAS;
+	uint32_t asBindingIndex;
 	bool asRegistered = false;
 
 	GPUResource<ResourceViews::TEXTURE_RENDER_TARGET> renderTargets[XPlatConstants::maxNumRenderTargetsPerPipeline()];
@@ -81,13 +92,12 @@ void Pipeline::init(bool isDynamic)
 	}
 
 	PipelineObjectBundle& currentPipelineBundle = pipelineData[id];
-	
+
 	currentPipelineBundle.cbufferRegistered = false;
 	currentPipelineBundle.numStructBuffers = 0;
 	currentPipelineBundle.numTexturesReadOnly = 0;
 	currentPipelineBundle.numTexturesRW = 0;
 	currentPipelineBundle.numRenderTargets = 0;
-	currentPipelineBundle.numTexturesStaging = 0;
 
 	currentPipelineBundle.vbufferRegistered = false;
 	currentPipelineBundle.iBufferRegistered = false;
@@ -124,11 +134,56 @@ void Pipeline::init(bool isDynamic)
 	}
 }
 
+const uint32_t Pipeline::GetBindingIndex(PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> handle) const
+{
+	assert(resolvedRootSig); // Resource bindings can't be retrived before they've been generated & resolved (see ResolveBindings())
+
+	auto currBundle = pipelineData[id];
+
+	if (handle.objFmt == ResourceViews::CBUFFER)
+	{
+		assert(currBundle.cbufferRegistered);
+		assert(handle.index == currBundle.cbuffer.GetResrcHandle().index);
+		return currBundle.cbufferBindingIndex;
+	}
+
+	if (handle.objFmt == ResourceViews::STRUCTBUFFER_RW)
+	{
+		assert(handle.index < currBundle.numStructBuffers);
+		return currBundle.structbufferBindingIndices[handle.index];
+	}
+
+	if (handle.objFmt == ResourceViews::TEXTURE_SUPPORTS_SAMPLING)
+	{
+		assert(handle.index < currBundle.numTexturesReadOnly);
+		return currBundle.readOnlyTextureBindingIndices[handle.index];
+	}
+
+	if (handle.objFmt == ResourceViews::TEXTURE_DIRECT_WRITE)
+	{
+		assert(handle.index < currBundle.numTexturesRW);
+		return currBundle.rwTextureBindingIndices[handle.index];
+	}
+
+	if (handle.objFmt == ResourceViews::RT_ACCEL_STRUCTURE)
+	{
+		assert(currBundle.asRegistered);
+		assert(handle.index == currBundle.pipelineAS.GetResrcHandle().second.index);
+		return currBundle.asBindingIndex;
+	}
+
+	// Other resources (vbuffer, ibuffer, RTV, DSV) are strictly bound through the input assembler;
+	// it's possible to justify an interpretation of "binding indices" for them, but it wouldn't mean the same thing
+	// as the concept does for generic textures & buffers
+	return 0xffffffff; // Placeholder/error code
+}
+
 PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterCBuffer(GPUResource<ResourceViews::CBUFFER>::resrc_desc desc, GPUResrcPermSetGeneric accessSettings)
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
 	assert(!currBundle.cbufferRegistered);
 
+	currBundle.cbufferRegistered = true;
 	currBundle.cbuffer = GPUResource<ResourceViews::CBUFFER>();
 	currBundle.cbuffer.InitFromScratch(desc, accessSettings, id);
 	return PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(0, ResourceViews::CBUFFER, id);
@@ -140,10 +195,11 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterStructBuffer(G
 
 	currBundle.structbuffers[currBundle.numStructBuffers] = GPUResource<ResourceViews::STRUCTBUFFER_RW>();
 	currBundle.structbuffers[currBundle.numStructBuffers].InitFromScratch(desc, accessSettings, id);
-	
+
 	auto handle = PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(currBundle.numStructBuffers, ResourceViews::STRUCTBUFFER_RW, id);
+	currBundle.UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::STRUCTBUFFER);
 	currBundle.numStructBuffers++;
-	
+
 	return handle;
 }
 
@@ -153,10 +209,11 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterTextureDirectW
 
 	currBundle.texturesRW[currBundle.numTexturesRW] = GPUResource<ResourceViews::TEXTURE_DIRECT_WRITE>();
 	currBundle.texturesRW[currBundle.numTexturesRW].InitFromScratch(desc, accessSettings, id);
-	
+
 	auto handle = PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(currBundle.numTexturesRW, ResourceViews::TEXTURE_DIRECT_WRITE, id);
+	currBundle.UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::TEXTURE_RW);
 	currBundle.numTexturesRW++;
-	
+
 	return handle;
 }
 
@@ -166,8 +223,9 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterTextureSamplea
 
 	currBundle.texturesReadOnly[currBundle.numTexturesReadOnly] = GPUResource<ResourceViews::TEXTURE_SUPPORTS_SAMPLING>();
 	currBundle.texturesReadOnly[currBundle.numTexturesReadOnly].InitFromScratch(desc, accessSettings, id);
-	
+
 	auto handle = PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(currBundle.numTexturesReadOnly, ResourceViews::TEXTURE_SUPPORTS_SAMPLING, id);
+	currBundle.UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::TEXTURE_SAMPLED);
 	currBundle.numTexturesReadOnly++;
 
 	return handle;
@@ -179,10 +237,10 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterRenderTarget(G
 
 	currBundle.renderTargets[currBundle.numRenderTargets] = GPUResource<ResourceViews::TEXTURE_RENDER_TARGET>();
 	currBundle.renderTargets[currBundle.numRenderTargets].InitFromScratch(desc, accessSettings, id);
-	
+
 	auto handle = PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(currBundle.numRenderTargets, ResourceViews::TEXTURE_DIRECT_WRITE, id);
 	currBundle.numTexturesReadOnly++;
-	
+
 	return handle;
 }
 
@@ -190,7 +248,7 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterDepthStencil(G
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
 	assert(!currBundle.depthStencilTexRegistered); // Only one depth-stencil supported per-pipeline
-	
+
 	currBundle.depthStencilTex = GPUResource<ResourceViews::TEXTURE_DEPTH_STENCIL>();
 	currBundle.depthStencilTex.InitFromScratch(desc, accessSettings, id);
 	currBundle.depthStencilTexRegistered = true;
@@ -198,21 +256,12 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterDepthStencil(G
 	return PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(0, ResourceViews::TEXTURE_DEPTH_STENCIL, id);
 }
 
-PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterStagingTexture(GPUResource<ResourceViews::TEXTURE_STAGING>::resrc_desc desc, GPUResrcPermSetTextures accessSettings)
-{
-	PipelineObjectBundle& currBundle = pipelineData[id];
-
-	currBundle.texturesStaging[currBundle.numTexturesStaging] = GPUResource<ResourceViews::TEXTURE_STAGING>();
-	currBundle.texturesStaging[currBundle.numTexturesStaging].InitFromScratch(desc, accessSettings, id);
-	auto handle = PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(currBundle.numTexturesStaging, ResourceViews::TEXTURE_STAGING, id);
-	
-	currBundle.numTexturesStaging++;
-	return handle;
-}
-
 PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterVBuffer(GPUResource<ResourceViews::VBUFFER>::resrc_desc desc, GPUResrcPermSetGeneric accessSettings)
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
+
+	// Multiple v/ibuffers are unsupported!
+	assert(!currBundle.vbufferRegistered);
 
 	currBundle.vbuffer = GPUResource<ResourceViews::VBUFFER>();
 	currBundle.vbuffer.InitFromScratch(desc, accessSettings, id);
@@ -228,11 +277,14 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterIBuffer(GPURes
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
 
+	// Multiple v/ibuffers are unsupported!
+	assert(!currBundle.iBufferRegistered);
+
 	currBundle.ibuffer = GPUResource<ResourceViews::IBUFFER>();
 	currBundle.ibuffer.InitFromScratch(desc, accessSettings, id);
 	currBundle.numNdces = desc.dimensions[0];
 	currBundle.iBufferRegistered = true;
-	
+
 	return PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(0, ResourceViews::IBUFFER, id);
 }
 
@@ -250,59 +302,52 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterAccelerationSt
 template<ResourceViews dstVariant>
 PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> RegisterSharedResrc(GPUResource<dstVariant>& dst, PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> srcHandle, uint8_t callingPipeID, uint32_t handleOffset)
 {
-	dst = GPUResource<dstVariant>();
 	switch (srcHandle.objFmt)
 	{
-		case ResourceViews::CBUFFER:
-			assert(dstVariant == ResourceViews::CBUFFER || dstVariant == ResourceViews::STRUCTBUFFER_RW || dstVariant == ResourceViews::VBUFFER);
-			dst.InitFromSharedResrc(Pipeline::DecodeCBufferHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::CBUFFER:
+		assert(dstVariant == ResourceViews::CBUFFER || dstVariant == ResourceViews::STRUCTBUFFER_RW || dstVariant == ResourceViews::VBUFFER);
+		dst.InitFromSharedResrc(Pipeline::DecodeCBufferHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::VBUFFER:
-			assert(dstVariant == ResourceViews::VBUFFER || dstVariant == ResourceViews::STRUCTBUFFER_RW || dstVariant == ResourceViews::CBUFFER);
-			dst.InitFromSharedResrc(Pipeline::DecodeVBufferHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::VBUFFER:
+		assert(dstVariant == ResourceViews::VBUFFER || dstVariant == ResourceViews::STRUCTBUFFER_RW || dstVariant == ResourceViews::CBUFFER);
+		dst.InitFromSharedResrc(Pipeline::DecodeVBufferHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::IBUFFER:
-			assert(dstVariant == ResourceViews::IBUFFER || dstVariant == ResourceViews::CBUFFER);
-			dst.InitFromSharedResrc(Pipeline::DecodeIBufferHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::IBUFFER:
+		assert(dstVariant == ResourceViews::IBUFFER || dstVariant == ResourceViews::CBUFFER);
+		dst.InitFromSharedResrc(Pipeline::DecodeIBufferHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::STRUCTBUFFER_RW:
-			assert(dstVariant == ResourceViews::STRUCTBUFFER_RW || dstVariant == ResourceViews::CBUFFER || dstVariant == ResourceViews::VBUFFER);
-			dst.InitFromSharedResrc(Pipeline::DecodeStructBufferHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::STRUCTBUFFER_RW:
+		assert(dstVariant == ResourceViews::STRUCTBUFFER_RW || dstVariant == ResourceViews::CBUFFER || dstVariant == ResourceViews::VBUFFER);
+		dst.InitFromSharedResrc(Pipeline::DecodeStructBufferHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::TEXTURE_DIRECT_WRITE:
-			assert(dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_RENDER_TARGET || dstVariant == ResourceViews::TEXTURE_DEPTH_STENCIL || dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE);
-			dst.InitFromSharedResrc(Pipeline::DecodeRWTextureHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::TEXTURE_DIRECT_WRITE:
+		assert(dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_RENDER_TARGET || dstVariant == ResourceViews::TEXTURE_DEPTH_STENCIL || dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE);
+		dst.InitFromSharedResrc(Pipeline::DecodeRWTextureHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::TEXTURE_SUPPORTS_SAMPLING:
-			assert(dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE);
-			dst.InitFromSharedResrc(Pipeline::DecodeReadOnlyTextureHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::TEXTURE_SUPPORTS_SAMPLING:
+		assert(dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE);
+		dst.InitFromSharedResrc(Pipeline::DecodeReadOnlyTextureHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::TEXTURE_STAGING:
-			assert(dstVariant == ResourceViews::TEXTURE_STAGING); // Conversion for this texture is not allowed (staging textures are defined in host memory and can't be accessed by the GPU, so they can't transition to any texture type that lives there)
-																  // We still allow sharing staging textures between pipelines because it might be convenient to use them for e.g. debugging changes between effects on the CPU
-			dst.InitFromSharedResrc(Pipeline::DecodeStagingTextureHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::TEXTURE_RENDER_TARGET:
+		assert(dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE || dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_RENDER_TARGET);
+		dst.InitFromSharedResrc(Pipeline::DecodeRenderTargetHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::TEXTURE_RENDER_TARGET:
-			assert(dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE || dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_RENDER_TARGET);
-			dst.InitFromSharedResrc(Pipeline::DecodeRenderTargetHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::TEXTURE_DEPTH_STENCIL:
+		assert(dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE || dstVariant == ResourceViews::TEXTURE_DEPTH_STENCIL);
+		dst.InitFromSharedResrc(Pipeline::DecodeDepthTexHandle(srcHandle), callingPipeID);
+		break;
 
-		case ResourceViews::TEXTURE_DEPTH_STENCIL:
-			assert(dstVariant == ResourceViews::TEXTURE_SUPPORTS_SAMPLING || dstVariant == ResourceViews::TEXTURE_DIRECT_WRITE || dstVariant == ResourceViews::TEXTURE_DEPTH_STENCIL);
-			dst.InitFromSharedResrc(Pipeline::DecodeDepthTexHandle(srcHandle), callingPipeID);
-			break;
-
-		case ResourceViews::RT_ACCEL_STRUCTURE:
-			assert(dstVariant == ResourceViews::RT_ACCEL_STRUCTURE);
-			dst.InitFromSharedResrc(Pipeline::DecodeAccelStructHandle(srcHandle), callingPipeID);
-			break;
+	case ResourceViews::RT_ACCEL_STRUCTURE:
+		assert(dstVariant == ResourceViews::RT_ACCEL_STRUCTURE);
+		dst.InitFromSharedResrc(Pipeline::DecodeAccelStructHandle(srcHandle), callingPipeID);
+		break;
 	}
 	return PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC>(handleOffset, dstVariant, callingPipeID);
 }
@@ -310,16 +355,18 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> RegisterSharedResrc(GPUResource<
 PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterCBuffer(PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> sharedCBufferHandle)
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
+	currBundle.cbufferRegistered = true;
 	return RegisterSharedResrc<ResourceViews::CBUFFER>(currBundle.cbuffer, sharedCBufferHandle, id, 0);
 }
 
 PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterStructBuffer(PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> sharedStructBufferHandle)
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
-	
+
 	auto handle = RegisterSharedResrc<ResourceViews::STRUCTBUFFER_RW>(currBundle.structbuffers[currBundle.numStructBuffers], sharedStructBufferHandle, id, currBundle.numStructBuffers);
+	currBundle.UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::STRUCTBUFFER);
 	currBundle.numStructBuffers++;
-	
+
 	return handle;
 }
 
@@ -328,8 +375,9 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterTextureSamplea
 	PipelineObjectBundle& currBundle = pipelineData[id];
 
 	auto handle = RegisterSharedResrc<ResourceViews::TEXTURE_SUPPORTS_SAMPLING>(currBundle.texturesReadOnly[currBundle.numTexturesReadOnly], sharedSampleableTextureHandle, id, currBundle.numTexturesReadOnly);
+	currBundle.UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::TEXTURE_SAMPLED);
 	currBundle.numTexturesReadOnly++;
-	
+
 	return handle;
 }
 
@@ -338,8 +386,9 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterTextureDirectW
 	PipelineObjectBundle& currBundle = pipelineData[id];
 
 	auto handle = RegisterSharedResrc<ResourceViews::TEXTURE_DIRECT_WRITE>(currBundle.texturesRW[currBundle.numTexturesRW], sharedDirectWriteTextureHandle, id, currBundle.numTexturesRW);
+	currBundle.UpdateBindingOrder(DXWrapper::ResourceBindList::DYNAMICALLY_ORDERED_BINDINGS::TEXTURE_RW);
 	currBundle.numTexturesRW++;
-	
+
 	return handle;
 }
 
@@ -349,17 +398,7 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterRenderTarget(P
 
 	auto handle = RegisterSharedResrc<ResourceViews::TEXTURE_RENDER_TARGET>(currBundle.renderTargets[currBundle.numRenderTargets], sharedRenderTargetHandle, id, currBundle.numRenderTargets);
 	currBundle.numRenderTargets++;
-	
-	return handle;
-}
 
-PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> Pipeline::RegisterStagingTexture(PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> sharedStagingTextureHandle)
-{
-	PipelineObjectBundle& currBundle = pipelineData[id];
-	
-	auto handle = RegisterSharedResrc<ResourceViews::TEXTURE_STAGING>(currBundle.texturesStaging[currBundle.numTexturesStaging], sharedStagingTextureHandle, id, currBundle.numTexturesStaging);
-	currBundle.numTexturesStaging++;
-	
 	return handle;
 }
 
@@ -416,12 +455,6 @@ GPUResource<ResourceViews::TEXTURE_DEPTH_STENCIL>* Pipeline::DecodeDepthTexHandl
 	return &pipelineData[depthTexHandle.srcPipelineID].depthStencilTex;
 }
 
-GPUResource<ResourceViews::TEXTURE_STAGING>* Pipeline::DecodeStagingTextureHandle(PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> stagingTextureHandle)
-{
-	assert(stagingTextureHandle.objFmt == ResourceViews::TEXTURE_STAGING);
-	return &pipelineData[stagingTextureHandle.srcPipelineID].texturesStaging[stagingTextureHandle.index];
-}
-
 GPUResource<ResourceViews::VBUFFER>* Pipeline::DecodeVBufferHandle(PipelineObjectHandle<PIPELINE_OBJ_TYPES::RESRC> vbufferHandle)
 {
 	assert(vbufferHandle.objFmt == ResourceViews::VBUFFER);
@@ -446,7 +479,7 @@ void Pipeline::EnableStaticSamplers()
 	linearSamplerEnabled = true;
 }
 
-void Pipeline::ResolveRootSignature()
+void Pipeline::ResolveBindings()
 {
 	PipelineObjectBundle& currBundle = pipelineData[id];
 
@@ -466,9 +499,12 @@ void Pipeline::ResolveRootSignature()
 	for (uint32_t i = 0; i < currBundle.numTexturesRW; i++) bindList.rwTextures[i] = currBundle.texturesRW[i].GetResrcHandle();
 	bindList.numRWTextures = currBundle.numTexturesRW;
 
+	// Make sure to specify structbuffer & texture binding order
+	currBundle.CopyBindingOrder(bindList.dynamicResourceBindingOrder);
+
 	// Acceleration structures
 	bindList.topLevelAS = currBundle.pipelineAS.GetResrcHandle().second; // Store using the second handle because top-level ASes are bound to the pipeline, not bottom-level ones
-															  // (should maybe change that declaration order, since TLAS are composed from BLAS, not the other way around)
+	// (should maybe change that declaration order, since TLAS are composed from BLAS, not the other way around)
 	bindList.tlasEnabled = currBundle.asRegistered;
 
 	// Samplers
@@ -476,7 +512,52 @@ void Pipeline::ResolveRootSignature()
 	bindList.staticSamplersEnabled[1] = linearSamplerEnabled;
 
 	// Generate root signature, update root signature status, return ^_^
-	rootSig = DXWrapper::ResolveRootSignature(bindList, currBundle.vbufferRegistered, id);
+	DXWrapper::BindingMetadata metadata = DXWrapper::ResolveRootSignature(bindList, currBundle.vbufferRegistered, id);
+
+	for (uint32_t i = 0; i < metadata.numResources; i++)
+	{
+		if (metadata.orderedUntypedResourceHandles[i] == currBundle.cbuffer.GetResrcHandle().index)
+		{
+			currBundle.cbufferBindingIndex = i;
+		}
+
+		for (uint32_t j = 0; j < currBundle.numStructBuffers; j++)
+		{
+			const uint64_t currStructBuffer = currBundle.structbuffers[j].GetResrcHandle().index;
+			if (metadata.orderedUntypedResourceHandles[i] == currStructBuffer)
+			{
+				currBundle.structbufferBindingIndices[j] = i;
+			}
+		}
+
+		for (uint32_t j = 0; j < currBundle.numTexturesReadOnly; j++)
+		{
+			const uint64_t currReadOnlyTexture = currBundle.texturesReadOnly[j].GetResrcHandle().index;
+			if (metadata.orderedUntypedResourceHandles[i] == currReadOnlyTexture)
+			{
+				currBundle.readOnlyTextureBindingIndices[j] = i;
+			}
+		}
+
+		for (uint32_t j = 0; j < currBundle.numTexturesRW; j++)
+		{
+			const uint64_t currTextureRW = currBundle.texturesRW[j].GetResrcHandle().index;
+			if (metadata.orderedUntypedResourceHandles[i] == currTextureRW)
+			{
+				currBundle.rwTextureBindingIndices[j] = i;
+			}
+		}
+
+		if (currBundle.asRegistered)
+		{
+			if (metadata.orderedUntypedResourceHandles[i] = currBundle.pipelineAS.GetResrcHandle().second.index)
+			{
+				currBundle.asBindingIndex = i;
+			}
+		}
+	}
+
+	rootSig = metadata.rootsig;
 	resolvedRootSig = true;
 }
 
@@ -503,13 +584,13 @@ PipelineObjectHandle<PIPELINE_OBJ_TYPES::SHADER> Pipeline::RegisterComputeShader
 	currBundle.csDispatchAxes[currBundle.numComputeShaders].y = dispatchY;
 	currBundle.csDispatchAxes[currBundle.numComputeShaders].z = dispatchZ;
 	currBundle.computeShaders[currBundle.numComputeShaders] = Shader<SHADER_TYPES::COMPUTE>(desc, id);
-	
+
 	auto handle = PipelineObjectHandle<PIPELINE_OBJ_TYPES::SHADER>(currBundle.numComputeShaders, SHADER_TYPES::COMPUTE, id);
 	currBundle.numComputeShaders++;
 	return handle;
 }
 
-PipelineObjectHandle<PIPELINE_OBJ_TYPES::SHADER> Pipeline::RegisterGraphicsShader(const char* dxilPathVertex, const char* dxilPathPixel, RasterSettings& gfxSettings)
+PipelineObjectHandle<PIPELINE_OBJ_TYPES::SHADER> Pipeline::RegisterGraphicsShader(const char* dxilPathVertex, const char* dxilPathPixel, const RasterSettings& gfxSettings)
 {
 	// Can't meaningfully generate shaders/PSOs without an existing root-signature
 	PipelineObjectBundle& currBundle = pipelineData[id];
@@ -616,10 +697,6 @@ void Pipeline::AppendClear(ClearEvent clear)
 
 void Pipeline::AppendCopy(CopyEvent cpy)
 {
-	// Need verification here (DXWrapper::VerifyCopy() or similar)
-//#ifdef _DEBUG
-//	DXwrapper::VerifyCopy();
-//#endif
 	events[numEvents].AssignCopy(cpy);
 	numEvents++;
 }
@@ -640,7 +717,7 @@ bool computeSigBound = false;
 bool gfxSigBound = false;
 bool rtSigBound = false;
 
-void Pipeline::PipelineEvent::IssueToCmdList(DXWrapper::DataHandle<D3D_CMD_LIST> clientCmdList, DXWrapper::DataHandle<D3D_ROOTSIG> rootSig, uint32_t pipelineID)
+void Pipeline::PipelineEvent::IssueToCmdList(DXWrapper::DataHandle<D3D_CMD_LIST> clientCmdList, DXWrapper::DataHandle<D3D_ROOTSIG> rootSig, uint32_t pipelineID, uint32_t* rootConstants, uint32_t numRootConstants)
 {
 	if (evtType == COPY)
 	{
@@ -655,7 +732,7 @@ void Pipeline::PipelineEvent::IssueToCmdList(DXWrapper::DataHandle<D3D_CMD_LIST>
 		// Root-sig binding, then emit draw/dispatch
 		if (!computeSigBound)
 		{
-			DXWrapper::BindComputeResources(clientCmdList, rootSig, pipelineID); // Sets compute root signature, binds compute descriptor tables
+			DXWrapper::BindComputeResources(clientCmdList, rootSig, pipelineID, rootConstants, numRootConstants); // Sets compute root signature, binds compute descriptor tables
 			computeSigBound = true;
 		}
 
@@ -666,7 +743,7 @@ void Pipeline::PipelineEvent::IssueToCmdList(DXWrapper::DataHandle<D3D_CMD_LIST>
 	{
 		if (!gfxSigBound)
 		{
-			DXWrapper::BindGFX_Resources(clientCmdList, rootSig, pipelineID); // Sets compute root signature, binds compute descriptor tables
+			DXWrapper::BindGFX_Resources(clientCmdList, rootSig, pipelineID, rootConstants, numRootConstants); // Sets compute root signature, binds compute descriptor tables
 			gfxSigBound = true;
 		}
 
@@ -682,10 +759,11 @@ void Pipeline::ResetStagingCmds()
 	numEvents = 0;
 }
 
-void Pipeline::BakeCmdList()
+void Pipeline::BakeCmdList(uint32_t* rootConstants, uint32_t numConstants)
 {
 	// Reset pipeline commandlist before submitting anything
 	// (in-case we're rebaking our command-list in-engine)
+	assert(numConstants < XPlatConstants::maxNumRootConstants);
 	auto cmdList = pipelineData[id].cmdList;
 
 	if (pipelineBaked)
@@ -699,13 +777,13 @@ void Pipeline::BakeCmdList()
 	// Issue each event we've recorded to the pipeline's internal command-list
 	for (uint32_t i = 0; i < numEvents; i++)
 	{
-		events[i].IssueToCmdList(cmdList, rootSig, id);
+		events[i].IssueToCmdList(cmdList, rootSig, id, rootConstants, numConstants);
 	}
 
 	// Close the command-list, now that we've populated it
 	DXWrapper::CloseCmdList(cmdList);
 	pipelineBaked = true;
-	
+
 	// Reset root-sig binding states
 	gfxSigBound = false;
 	computeSigBound = false;
@@ -720,18 +798,18 @@ void Pipeline::BakeCmdList()
 	}
 }
 
-void Pipeline::SubmitCmdList(bool synchronous)
+void Pipeline::SubmitCmdList(bool synchronous, uint32_t* rootConstants, uint32_t numConstants)
 {
 	// Allow baking command-lists immediately before the first frame instead of preparing them on startup (allows for more runtime changess &c before the frame logic is locked in)
 	if (numEvents > 0)
 	{
-		BakeCmdList();
+		BakeCmdList(rootConstants, numConstants);
 	}
 
 	// Only issue work if a valid command list exists (i.e. the pipeline has been baked down)
 	if (pipelineBaked)
 	{
-		// Submits command-list for API processing, with/out a hidden call to handle API infrastructure calls (possible copies for resource uploads, etc)
+		// Submits command-list for API processing, with/out a hidden call to handle API infrastructure stuff (possible copies for resource uploads, etc)
 		DXWrapper::IssueWork(pipelineData[id].cmdList, synchronous, id);
 	}
 }
