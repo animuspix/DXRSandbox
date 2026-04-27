@@ -1,5 +1,7 @@
 # DXRSandbox
 
+Note - Dead project, I tried a few different angles on runtime GPU BVHs with compute, and didn't have much luck with any of them. Also it died of complexity, by trying to be two different things at the same time, a technical skills demo for recruiters and an art sandbox passion project.
+
 DXRSandbox is mostly a sandbox for learning about DXR and testing DXR techniques, but I also plan to use it as a general sandbox for GPU graphics experiments (building these engines is hard!).
 
 The project should have three rendering pathways; compute-only using software AS setup and raytracing, hybrid using hardware AS (through ray queries) for secondary rays and rasterization for primary, and "ray-tracing" using DXR shader tables for everything.
